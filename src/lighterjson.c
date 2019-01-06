@@ -4,7 +4,7 @@
  * @author    Aaron Kaluszka
  * @version   0.1.0
  * @date      31 Dec 2018
- * @copyright Copyright 2017 - 2018 Aaron Kaluszka
+ * @copyright Copyright 2017-2018 Aaron Kaluszka
  *            Licensed under the Apache License, Version 2.0 (the "License");
  *            you may not use this file except in compliance with the License.
  *            You may obtain a copy of the License at
@@ -19,12 +19,10 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -58,7 +56,7 @@ int do_dir(char path[]) {
   dir = opendir(path);
   if (!dir) {
     fprintf(stderr, "Could not open %s\n", path);
-    return 1;
+    return EXIT_FAILURE;
   }
   chdir(path);
   while ((entry = readdir(dir)) != NULL) {
@@ -73,7 +71,7 @@ int do_dir(char path[]) {
     }
   }
   closedir(dir);
-  return 0;
+  return EXIT_SUCCESS;
 }
 
 int do_file(char filename[]) {
@@ -84,46 +82,47 @@ int do_file(char filename[]) {
   fd = open(filename, O_RDWR); 
   if (fd < 0) {
     fprintf(stderr, "Could not open %s\n", filename);
-    return 1;
+    return EXIT_FAILURE;
   }
   if (!quiet) {
-    fprintf(stderr, "%s: ", filename);
+    printf("%s: ", filename);
   }
   fstat(fd, &sb);
   file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (file.data_start == MAP_FAILED) {
     fprintf(stderr, "Could not map file\n");
-    return 1;
+    return EXIT_FAILURE;
   }
   file.rindex = file.windex = file.lindex = file.data_start;
   file.data_end = file.data_start + sb.st_size;
   if (file.data_end - file.data_start > 2) {
     if (*file.data_start == 0 || *(file.data_start + 1) == 0) {
       fprintf(stderr, "Only UTF-8 input is currently supported\n");
-      return 1;
+      return EXIT_FAILURE;
     }
   }
   do_value(&file);
   write_data(&file, 0);
   saved_size = file.data_end - file.windex;
   if (!quiet) {
-    fprintf(stderr, "Saved %zu bytes\n", saved_size);
+    printf("Saved %zu bytes\n", saved_size);
   }
   if (msync(file.data_start, file.windex - file.data_start, MS_SYNC) < 0) {
     fprintf(stderr, "Could not sync file\n");
-    return 1;
+    return EXIT_FAILURE;
   }
   ftruncate(fd, file.windex - file.data_start);
-  return 0;
+  return EXIT_SUCCESS;
 }
 
-void usage(char progname[]) {
-  fprintf(stderr, "Usage: %s [options] path\n"
-                  "JSON minifier\n"
-                  "Options:\n"
-                  "  -p N Numeric precision (number of decimal places; can be negative)\n"
-                  "  -q   Suppress output\n", progname);
-  exit(EXIT_FAILURE);
+void usage(char progname[], int status) {
+  fprintf(EXIT_SUCCESS ? stdout : stderr,
+          "Usage: %s [options] path\n"
+          "JSON minifier\n"
+          "Options:\n"
+          "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -q   Suppress output\n", progname);
+  exit(status);
 }
 
 int main(int argc, char* argv[]) {
@@ -133,14 +132,18 @@ int main(int argc, char* argv[]) {
   precision = INT64_MAX;
   quiet = 0;
   char* i;
-  while ((opt = getopt(argc, argv, "qp:")) != -1) {
+  while ((opt = getopt(argc, argv, "h?qp:")) != -1) {
     switch (opt) {
+      case 'h':
+      case '?':
+        usage(argv[0], EXIT_SUCCESS);
+        break;
       case 'q':
         quiet = 1;
         break;
       case 'p':
         if (!optarg) {
-          usage(argv[0]);
+          usage(argv[0], EXIT_FAILURE);
         }
         i = optarg;
         if (*i == '-') {
@@ -176,11 +179,11 @@ int main(int argc, char* argv[]) {
         }
         break;
       default:
-        usage(argv[0]);
+        usage(argv[0], EXIT_FAILURE);
     }
   }
   if (argc - optind != 1) {
-    usage(argv[0]);
+    usage(argv[0], EXIT_FAILURE);
   }
   stat(argv[optind], &sb);
   if (sb.st_mode & S_IFDIR) {

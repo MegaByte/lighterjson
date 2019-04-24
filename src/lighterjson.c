@@ -23,17 +23,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/mman.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 typedef struct fileinfo {
-  u_int8_t* data_start;
-  u_int8_t* rindex;
-  u_int8_t* windex;
-  u_int8_t* lindex;
-  u_int8_t* data_end;
+  uint8_t* data_start;
+  uint8_t* rindex;
+  uint8_t* windex;
+  uint8_t* lindex;
+  uint8_t* data_end;
 } File;
 
 int64_t precision;
@@ -55,21 +55,29 @@ void write_data(File* file, ptrdiff_t index_offset) {
 int do_dir(char path[]) {
   DIR *dir;
   struct dirent *entry;
+  char *name;
+  struct stat sb;
   dir = opendir(path);
   if (!dir) {
-    fprintf(stderr, "Could not open %s\n", path);
+    fprintf(stderr, "Could not open %s: %s\n", path, strerror(errno));
     return 1;
   }
   chdir(path);
   while ((entry = readdir(dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+    name = entry->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
       continue;
     }
-    if (entry->d_type == DT_DIR) {
-      do_dir(entry->d_name);
+    if (stat(name, &sb) != 0) {
+      fprintf(stderr, "Could not get information of file %s\n", name);
+      closedir(dir);
+      return 1;
+    }
+    if (sb.st_mode == S_IFDIR) {
+      do_dir(name);
       chdir("..");
-    } else if (strstr(entry->d_name, ".json") - entry->d_name == strlen(entry->d_name) - 5) {
-      do_file(entry->d_name);
+    } else if (strstr(name, ".json") - name == strlen(name) - 5) {
+      do_file(name);
     }
   }
   closedir(dir);
@@ -77,44 +85,60 @@ int do_dir(char path[]) {
 }
 
 int do_file(char filename[]) {
-  size_t saved_size;
-  File file;
+  File file = { 0 };
   int fd;
-  struct stat sb;
+  struct stat sb = { 0 };
+  int exit_code = 0;
   fd = open(filename, O_RDWR); 
   if (fd < 0) {
-    fprintf(stderr, "Could not open %s\n", filename);
-    return 1;
+    fprintf(stderr, "Could not open %s: %s\n", filename, strerror(errno));
+    exit_code = 1;
+    goto close_descriptors_and_return;
   }
   if (!quiet) {
     fprintf(stderr, "%s: ", filename);
   }
   fstat(fd, &sb);
-  file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
   if (file.data_start == MAP_FAILED) {
-    fprintf(stderr, "Could not map file\n");
-    return 1;
+    fprintf(stderr, "Could not map file: %s\n", strerror(errno));
+    exit_code = 1;
+    goto close_descriptors_and_return;
   }
   file.rindex = file.windex = file.lindex = file.data_start;
   file.data_end = file.data_start + sb.st_size;
   if (file.data_end - file.data_start > 2) {
     if (*file.data_start == 0 || *(file.data_start + 1) == 0) {
       fprintf(stderr, "Only UTF-8 input is currently supported\n");
-      return 1;
+      exit_code = 1;
+      goto close_descriptors_and_return;
     }
   }
   do_value(&file);
   write_data(&file, 0);
-  saved_size = file.data_end - file.windex;
-  if (!quiet) {
-    fprintf(stderr, "Saved %zu bytes\n", saved_size);
-  }
   if (msync(file.data_start, file.windex - file.data_start, MS_SYNC) < 0) {
-    fprintf(stderr, "Could not sync file\n");
-    return 1;
+    fprintf(stderr, "Could not sync file: %s\n", strerror(errno));
+    exit_code = 1;
+    goto close_descriptors_and_return;
   }
-  ftruncate(fd, file.windex - file.data_start);
-  return 0;
+  if (!quiet) {
+    fprintf(stderr, "Saved %lu bytes\n", (unsigned long) (file.data_end - file.windex));
+  }
+
+  close_descriptors_and_return:
+  if (file.data_start != 0 && file.data_start != MAP_FAILED) {
+    munmap(file.data_start, sb.st_size);
+  }
+  if (fd >= 0) {
+    // We truncate the file here because Cygwin mmap implementation opens a new file descriptor,
+    // and ftruncate fails if that descriptor is open with a "Permission denied" error
+    if (exit_code == 0 && ftruncate(fd, file.windex - file.data_start) < 0) {
+      fprintf(stderr, "Could not truncate file to new size: %s. It may have garbage characters at the end\n", strerror(errno));
+    }
+    close(fd);
+  }
+
+  return exit_code;
 }
 
 void usage(char progname[]) {
@@ -161,7 +185,7 @@ int main(int argc, char* argv[]) {
             case '8':
             case '9':
               if (precision > INT64_MAX / 10 || (precision == INT64_MAX / 10 && *i > '7')) {
-                fprintf(stderr, "Precision limited to %lld\n", INT64_MAX);
+                fprintf(stderr, "Precision limited to %lld\n", (long long int) INT64_MAX);
                 precision = INT64_MAX;
               }
               precision = precision * 10 + *i - '0';
@@ -234,14 +258,14 @@ void do_array(File* file) {
   }
 }
 
-u_int64_t hex_value(File* file) {
-  u_int64_t value = 0;
+uint64_t hex_value(File* file) {
+  uint64_t value = 0;
   if (file->rindex + 4 > file->data_end) {
     return INT64_MAX;
   }
   for (size_t i = 0; i < 4; ++i) {
-    const u_int64_t x = file->rindex[i];
-    const u_int64_t shift = (3 - i) << 2;
+    const uint64_t x = file->rindex[i];
+    const uint64_t shift = (3 - i) << 2;
     if (x >= '0' && x <= '9') {
       value += ((x - '0') << shift);
     } else if (x >= 'A' && x <= 'F') {
@@ -256,8 +280,8 @@ u_int64_t hex_value(File* file) {
 }
 
 void do_unicode(File* file) {
-  u_int64_t value = hex_value(file);
-  u_int64_t value2 = 0;
+  uint64_t value = hex_value(file);
+  uint64_t value2 = 0;
   if (value == INT64_MAX) {
     fprintf(stderr, "INVALID HEX\n");
     return;
@@ -293,8 +317,8 @@ void do_unicode(File* file) {
     *file->windex++ = value;
     return;
   } else if (value < 0x800) {
-    *file->windex++ = ((u_int8_t)(value >> 6) & 0x1F) | 0xC0;
-    *file->windex++ = ((u_int8_t)(value & 0x3F)) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 6) & 0x1F) | 0xC0;
+    *file->windex++ = ((uint8_t)(value & 0x3F)) | 0x80;
     return;
   }
   if (value & 0xD800) { // surrogate pair
@@ -309,14 +333,14 @@ void do_unicode(File* file) {
     write_data(file, 4);
   }
   if (value < 0x10000) {
-    *file->windex++ = ((u_int8_t)(value >> 12) & 0xF) | 0xE0;
-    *file->windex++ = (u_int8_t)(value >> 6) & 0x3F;
-    *file->windex++ = ((u_int8_t)value & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 12) & 0xF) | 0xE0;
+    *file->windex++ = (uint8_t)(value >> 6) & 0x3F;
+    *file->windex++ = ((uint8_t)value & 0x3F) | 0x80;
   } else {
-    *file->windex++ = ((u_int8_t)(value >> 18) & 0x7) | 0xF0;
-    *file->windex++ = ((u_int8_t)(value >> 12) & 0x3F) | 0x80;
-    *file->windex++ = ((u_int8_t)(value >> 6) & 0x3F) | 0x80;
-    *file->windex++ = ((u_int8_t)value & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 18) & 0x7) | 0xF0;
+    *file->windex++ = ((uint8_t)(value >> 12) & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 6) & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)value & 0x3F) | 0x80;
   }
 }
 
@@ -421,24 +445,24 @@ void do_object(File* file) {
 }
 
 void do_number(File* file) {
-  u_int8_t* decimal = 0;
-  u_int8_t* exponent = 0;
-  u_int8_t* non_zero_start = 0;
-  u_int8_t* non_zero_finish = 0;
-  u_int8_t* exponent_start = 0;
-  u_int8_t* number_end = 0;
+  uint8_t* decimal = 0;
+  uint8_t* exponent = 0;
+  uint8_t* non_zero_start = 0;
+  uint8_t* non_zero_finish = 0;
+  uint8_t* exponent_start = 0;
+  uint8_t* number_end = 0;
   int64_t exponent_value = 0;
   int64_t min_exponent = 0;
   int64_t max_exponent = 0;
   int64_t new_decimal = 0;
   int64_t new_exponent = 0;
-  u_int64_t digit_width = 0;
-  u_int64_t new_exponent_width = 0;
+  uint64_t digit_width = 0;
+  uint64_t new_exponent_width = 0;
   int negative = 0;
   int negative_exponent = 0;
-  u_int64_t zeroes = 0;
-  u_int8_t* i;
-  u_int64_t multiplier = 1;
+  uint64_t zeroes = 0;
+  uint8_t* i;
+  uint64_t multiplier = 1;
   if (*file->rindex == '-') {
     negative = 1;
     ++(file->rindex);

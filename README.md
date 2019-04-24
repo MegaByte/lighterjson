@@ -17,7 +17,9 @@ Numbers can be rounded to specific decimal places using the -p switch. Use negat
 
 JSON technically supports numbers of unlimited size, but due to implementation complexity, the supported exponent range is [-9223372036854775807, 9223372036854775807].
 
-Files must be UTF-8. Not all cases of ill-formed files are currently handled. Only works with POSIX systems currently. Make sure to backup before running.
+Files must be UTF-8. Not all cases of ill-formed files are currently handled. Make sure to backup before running.
+
+It depends on standard POSIX headers, so it works best in POSIX-compliant operating systems. However, it can also be built for Windows by using a Cygwin-based toolchain.
 
 ## Author
 Aaron Kaluszka <<megabyte@kontek.net>>

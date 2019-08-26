@@ -2,9 +2,9 @@
  * @file      lighterjson.c
  * @brief     JSON minifier
  * @author    Aaron Kaluszka
- * @version   0.1.0
- * @date      31 Dec 2018
- * @copyright Copyright 2017-2018 Aaron Kaluszka
+ * @version   0.2.0
+ * @date      25 Aug 2019
+ * @copyright Copyright 2017-2019 Aaron Kaluszka
  *            Licensed under the Apache License, Version 2.0 (the "License");
  *            you may not use this file except in compliance with the License.
  *            You may obtain a copy of the License at
@@ -36,8 +36,9 @@ typedef struct fileinfo {
 
 int64_t precision;
 int quiet;
+int newlines;
 
-int do_value(File* file);
+int do_value(File* file, int line_start);
 int do_file(char filename[]);
 
 // Write queued data and move past data to skip
@@ -101,8 +102,16 @@ int do_file(char filename[]) {
       return EXIT_FAILURE;
     }
   }
-  do_value(&file);
+  do_value(&file, newlines == 2 ? 2 : 0);
+  if (newlines) {
+    while (file.rindex < file.data_end) {  
+      do_value(&file, newlines);
+    }
+  }
   write_data(&file, 0);
+  if (newlines == 1 && file.windex > file.data_start && *(file.windex - 1) == '\n') {
+    --(file.windex);
+  }
   saved_size = file.data_end - file.windex;
   if (!quiet) {
     printf("Saved %zu bytes\n", saved_size);
@@ -121,6 +130,8 @@ void usage(char progname[], int status) {
           "JSON minifier\n"
           "Options:\n"
           "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -n   Process NDJSON/JSON Lines\n"
+          "  -N   Process NDJSON, preserving empty lines\n"
           "  -q   Suppress output\n", progname);
   exit(status);
 }
@@ -131,8 +142,9 @@ int main(int argc, char* argv[]) {
   int negative = 0;
   precision = INT64_MAX;
   quiet = 0;
+  newlines = 0;
   char* i;
-  while ((opt = getopt(argc, argv, "h?qp:")) != -1) {
+  while ((opt = getopt(argc, argv, "h?qnNp:")) != -1) {
     switch (opt) {
       case 'h':
       case '?':
@@ -140,6 +152,12 @@ int main(int argc, char* argv[]) {
         break;
       case 'q':
         quiet = 1;
+        break;
+      case 'n':
+        newlines = 1;
+        break;
+      case 'N':
+        newlines = 2;
         break;
       case 'p':
         if (!optarg) {
@@ -222,7 +240,7 @@ int do_array_next(File* file) {
 
 void do_array(File* file) {
   ++(file->rindex);
-  if (do_value(file)) {
+  if (do_value(file, 0)) {
     ++(file->rindex);
     return;
   }
@@ -230,7 +248,7 @@ void do_array(File* file) {
     if (do_array_next(file)) {
       break;
     }
-    if (do_value(file)) {
+    if (do_value(file, 0)) {
       // TODO clean up
       break;
     }
@@ -416,7 +434,7 @@ void do_object(File* file) {
       break;
     }
     do_object_colon(file);
-    do_value(file);
+    do_value(file, 0);
     if (do_object_next(file)) {
       break;
     }
@@ -686,7 +704,8 @@ void do_number(File* file) {
   }
 }
 
-int do_value(File* file) {
+int do_value(File* file, int line_start) {
+  int newline_added = 0;
   while (file->rindex < file->data_end) {
     switch (*file->rindex) {
       case '"':
@@ -722,6 +741,16 @@ int do_value(File* file) {
       case '9':
         do_number(file);
         return 0;
+      case '\n':
+        if (line_start == 2)
+          ++(file->rindex);
+        else if (line_start == 1 && !newline_added) {
+          ++(file->rindex);
+          newline_added = 1;
+        } else {
+          write_data(file, 1);
+        }
+        break;
       default: // invalid or whitespace
         write_data(file, 1);
         break;

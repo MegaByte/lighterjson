@@ -6,10 +6,12 @@ Optimal JSON minifier
 
 ## Options
     -p N Numeric precision (number of decimal places; can be negative)
+    -n   Process NDJSON/JSON Lines
+    -N   Process NDJSON, preserving empty lines
     -q   Suppress output
 
 ## Notes
-LighterJSON minifies JSON files in place. It removes all whitespace. It also converts all strings and numbers to their most compact representation.
+LighterJSON minifies regular and newline-delimited JSON files in place. It removes all whitespace. It also converts all strings and numbers to their most compact representation.
 
 If passed a directory, all .json files contained within will be processed recursively.
 

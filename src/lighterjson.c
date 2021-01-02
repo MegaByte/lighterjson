@@ -2,9 +2,9 @@
  * @file      lighterjson.c
  * @brief     JSON minifier
  * @author    Aaron Kaluszka
- * @version   0.2.0
- * @date      25 Aug 2019
- * @copyright Copyright 2017-2019 Aaron Kaluszka
+ * @version   0.3.0
+ * @date      1 Jan 2021
+ * @copyright Copyright 2017-2021 Aaron Kaluszka
  *            Licensed under the Apache License, Version 2.0 (the "License");
  *            you may not use this file except in compliance with the License.
  *            You may obtain a copy of the License at
@@ -18,6 +18,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-typedef struct fileinfo {
+typedef struct File {
   u_int8_t* data_start;
   u_int8_t* rindex;
   u_int8_t* windex;
@@ -34,224 +35,35 @@ typedef struct fileinfo {
   u_int8_t* data_end;
 } File;
 
+typedef struct Bitfield {
+  size_t size;
+  u_int64_t* bits;
+  size_t bit_level;
+  size_t byte_level;
+  size_t current;
+} Bitfield;
+
+typedef enum Container {None = -1, Array, Object} Container;
+
 int64_t precision;
 int quiet;
 int newlines;
 
-int do_value(File* file, int line_start);
 int do_file(char filename[]);
 
 // Write queued data and move past data to skip
 void write_data(File* file, ptrdiff_t index_offset) {
   memmove(file->windex, file->lindex, file->rindex - file->lindex);
   file->windex += file->rindex - file->lindex;
-  if (index_offset) {
-    file->rindex += index_offset;
-  }
+  file->rindex += index_offset;
   file->lindex = file->rindex;
 }
 
-int do_dir(char path[]) {
-  DIR *dir;
-  struct dirent *entry;
-  dir = opendir(path);
-  if (!dir) {
-    fprintf(stderr, "Could not open %s\n", path);
-    return EXIT_FAILURE;
-  }
-  chdir(path);
-  while ((entry = readdir(dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    if (entry->d_type == DT_DIR) {
-      do_dir(entry->d_name);
-      chdir("..");
-    } else if (strstr(entry->d_name, ".json") - entry->d_name == strlen(entry->d_name) - 5) {
-      do_file(entry->d_name);
-    }
-  }
-  closedir(dir);
-  return EXIT_SUCCESS;
-}
-
-int do_file(char filename[]) {
-  size_t saved_size;
-  File file;
-  int fd;
-  struct stat sb;
-  fd = open(filename, O_RDWR); 
-  if (fd < 0) {
-    fprintf(stderr, "Could not open %s\n", filename);
-    return EXIT_FAILURE;
-  }
-  if (!quiet) {
-    printf("%s: ", filename);
-  }
-  fstat(fd, &sb);
-  file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if (file.data_start == MAP_FAILED) {
-    fprintf(stderr, "Could not map file\n");
-    return EXIT_FAILURE;
-  }
-  file.rindex = file.windex = file.lindex = file.data_start;
-  file.data_end = file.data_start + sb.st_size;
-  if (file.data_end - file.data_start > 2) {
-    if (*file.data_start == 0 || *(file.data_start + 1) == 0) {
-      fprintf(stderr, "Only UTF-8 input is currently supported\n");
-      return EXIT_FAILURE;
-    }
-  }
-  do_value(&file, newlines == 2 ? 2 : 0);
-  if (newlines) {
-    while (file.rindex < file.data_end) {  
-      do_value(&file, newlines);
-    }
-  }
-  write_data(&file, 0);
-  if (newlines == 1 && file.windex > file.data_start && *(file.windex - 1) == '\n') {
-    --(file.windex);
-  }
-  saved_size = file.data_end - file.windex;
-  if (!quiet) {
-    printf("Saved %zu bytes\n", saved_size);
-  }
-  if (msync(file.data_start, file.windex - file.data_start, MS_SYNC) < 0) {
-    fprintf(stderr, "Could not sync file\n");
-    return EXIT_FAILURE;
-  }
-  ftruncate(fd, file.windex - file.data_start);
-  return EXIT_SUCCESS;
-}
-
-void usage(char progname[], int status) {
-  fprintf(EXIT_SUCCESS ? stdout : stderr,
-          "Usage: %s [options] path\n"
-          "JSON minifier\n"
-          "Options:\n"
-          "  -p N Numeric precision (number of decimal places; can be negative)\n"
-          "  -n   Process NDJSON/JSON Lines\n"
-          "  -N   Process NDJSON, preserving empty lines\n"
-          "  -q   Suppress output\n", progname);
-  exit(status);
-}
-
-int main(int argc, char* argv[]) {
-  struct stat sb;
-  int opt;
-  int negative = 0;
-  precision = INT64_MAX;
-  quiet = 0;
-  newlines = 0;
-  char* i;
-  while ((opt = getopt(argc, argv, "h?qnNp:")) != -1) {
-    switch (opt) {
-      case 'h':
-      case '?':
-        usage(argv[0], EXIT_SUCCESS);
-        break;
-      case 'q':
-        quiet = 1;
-        break;
-      case 'n':
-        newlines = 1;
-        break;
-      case 'N':
-        newlines = 2;
-        break;
-      case 'p':
-        if (!optarg) {
-          usage(argv[0], EXIT_FAILURE);
-        }
-        i = optarg;
-        if (*i == '-') {
-          negative = 1;
-          ++i;
-        }
-        precision = 0;
-        for (; *i && precision < INT64_MAX; ++i) {
-          switch (*i) {
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-            case '8':
-            case '9':
-              if (precision > INT64_MAX / 10 || (precision == INT64_MAX / 10 && *i > '7')) {
-                fprintf(stderr, "Precision limited to %lld\n", INT64_MAX);
-                precision = INT64_MAX;
-              }
-              precision = precision * 10 + *i - '0';
-              break;
-            default:
-              fprintf(stderr, "Precision must be an integer\n");
-              exit(EXIT_FAILURE);
-          }
-        }
-        if (negative) {
-          precision = -precision;
-        }
-        break;
-      default:
-        usage(argv[0], EXIT_FAILURE);
-    }
-  }
-  if (argc - optind != 1) {
-    usage(argv[0], EXIT_FAILURE);
-  }
-  stat(argv[optind], &sb);
-  if (sb.st_mode & S_IFDIR) {
-    return do_dir(argv[optind]);
-  }
-  return do_file(argv[optind]);
-}
-
-void do_true(File* file) {
-  file->rindex += 4;
-}
-
-void do_false(File* file) {
-  file->rindex += 5;
-}
-
-void do_null(File* file) {
-  file->rindex += 4;
-}
-
-int do_array_next(File* file) {
-  while (file->rindex < file->data_end) {
-    switch (*file->rindex) {
-      case ',':
-        ++(file->rindex);
-        return 0;
-      case ']':
-        ++(file->rindex);
-        return 1;
-      default:
-        write_data(file, 1);
-    }
-  }
-  return 0;
-}
-
-void do_array(File* file) {
-  ++(file->rindex);
-  if (do_value(file, 0)) {
-    ++(file->rindex);
-    return;
-  }
-  while (file->rindex < file->data_end) {
-    if (do_array_next(file)) {
-      break;
-    }
-    if (do_value(file, 0)) {
-      // TODO clean up
-      break;
-    }
+void do_literal(File* file, const char* literal, size_t length) {
+  if (strncmp((char*) file->rindex, literal, length)) {
+    write_data(file, length);
+  } else {
+    file->rindex += length;
   }
 }
 
@@ -390,35 +202,6 @@ int do_object_label(File* file) {
         do_string(file);
         return 0;
       case '}':
-        ++(file->rindex);
-        return 1;
-      default:
-        write_data(file, 1);
-    }
-  }
-  return 1;
-}
-
-void do_object_colon(File* file) {
-  while (file->rindex < file->data_end) {
-    switch (*file->rindex) {
-      case ':':
-        ++(file->rindex);
-        return;
-      default:
-        write_data(file, 1);
-    }
-  }
-}
-
-int do_object_next(File* file) {
-  while (file->rindex < file->data_end) {
-    switch (*file->rindex) {
-      case ',':
-        ++(file->rindex);
-        return 0;
-      case '}':
-        ++(file->rindex);
         return 1;
       default:
         write_data(file, 1);
@@ -428,15 +211,16 @@ int do_object_next(File* file) {
 }
 
 void do_object(File* file) {
-  ++(file->rindex);
+  if (do_object_label(file)) {
+    return;
+  }
   while (file->rindex < file->data_end) {
-    if (do_object_label(file)) {
-      break;
-    }
-    do_object_colon(file);
-    do_value(file, 0);
-    if (do_object_next(file)) {
-      break;
+    switch (*file->rindex) {
+      case ':':
+        ++(file->rindex);
+        return;
+      default:
+        write_data(file, 1);
     }
   }
 }
@@ -704,30 +488,111 @@ void do_number(File* file) {
   }
 }
 
+void init_bits(Bitfield* bitfield) {
+  bitfield->size = sizeof(u_int64_t);
+  bitfield->bits = (u_int64_t*) malloc(bitfield->size);
+  bitfield->bit_level = 0;
+  bitfield->byte_level = 0;
+  bitfield->current = -1;
+}
+
+void increment_bit(Bitfield* bitfield) {
+  if (bitfield->bit_level == sizeof(u_int64_t) * CHAR_BIT - 1) {
+    bitfield->bit_level = 0;
+    ++(bitfield->byte_level);
+  } else {
+    ++(bitfield->bit_level);
+  }
+  if (bitfield->byte_level > bitfield->size) {
+    bitfield->bits = realloc(bitfield->bits, ++(bitfield->size));
+  }
+}
+
+void push_set_bit(Bitfield* bitfield) {
+  bitfield->current = 1;
+  bitfield->bits[bitfield->byte_level] |= (1ULL << bitfield->bit_level);
+  increment_bit(bitfield);
+}
+
+void push_clear_bit(Bitfield* bitfield) {
+  bitfield->current = 0;
+  bitfield->bits[bitfield->byte_level] &= ~(1ULL << bitfield->bit_level);
+  increment_bit(bitfield);
+}
+
+void pop_bit(Bitfield* bitfield) {
+  if (bitfield->bit_level == 0) {
+    if (bitfield->byte_level > 0) {
+      --(bitfield->byte_level);
+      bitfield->bit_level = sizeof(u_int64_t) * CHAR_BIT - 1;
+    }
+  } else {
+    --(bitfield->bit_level);
+  }
+  bitfield->current = bitfield->bit_level > 0 || bitfield->byte_level > 0 ? (bitfield->bits[bitfield->byte_level] >> (bitfield->bit_level - 1)) & 1 : -1;
+}
+
 int do_value(File* file, int line_start) {
-  int newline_added = 0;
+  Bitfield parent_types;
+  init_bits(&parent_types);
+  int comma_ok = 0;
   while (file->rindex < file->data_end) {
     switch (*file->rindex) {
       case '"':
         do_string(file);
-        return 0;
+        comma_ok = 1;
+        break;
       case '{':
+        ++(file->rindex);
+        push_set_bit(&parent_types);
         do_object(file);
-        return 0;
+        comma_ok = 0;
+        break;
+      case '}':
+        if (parent_types.current == Object) {
+          ++(file->rindex);
+          pop_bit(&parent_types);
+          comma_ok = 1;
+        } else {
+          write_data(file, 1);
+        }
+        break;
       case '[':
-        do_array(file);
-        return 0;
+        ++(file->rindex);
+        push_clear_bit(&parent_types);
+        comma_ok = 0;
+        break;
       case ']':
-        return 1;
+        if (parent_types.current == Array) {
+          ++(file->rindex);
+          pop_bit(&parent_types);
+          comma_ok = 1;
+        } else {
+          write_data(file, 1);
+        }
+        break;
+      case ',':
+        if (comma_ok && parent_types.current != None) {
+          ++(file->rindex);
+          if (parent_types.current == Object) {
+            do_object(file);
+          }
+        } else {
+          write_data(file, 1);
+        }
+        break;
       case 't':
-        do_true(file);
-        return 0;
+        do_literal(file, "true", 4);
+        comma_ok = 1;
+        break;
       case 'f':
-        do_false(file);
-        return 0;
+        do_literal(file, "false", 5);
+        comma_ok = 1;
+        break;
       case 'n':
-        do_null(file);
-        return 0;
+        do_literal(file, "null", 4);
+        comma_ok = 1;
+        break;
       case '-':
       case '0':
       case '1':
@@ -740,21 +605,181 @@ int do_value(File* file, int line_start) {
       case '8':
       case '9':
         do_number(file);
-        return 0;
+        comma_ok = 1;
+        break;
       case '\n':
-        if (line_start == 2)
-          ++(file->rindex);
-        else if (line_start == 1 && !newline_added) {
-          ++(file->rindex);
-          newline_added = 1;
-        } else {
-          write_data(file, 1);
+        switch (line_start) {
+          case 1:
+            --line_start;
+            // fallthrough
+          case 2:
+            ++(file->rindex);
+            break;
+          default:
+            write_data(file, 1);
         }
         break;
       default: // invalid or whitespace
         write_data(file, 1);
-        break;
     }
   }
+  free(parent_types.bits);
   return 0;
+}
+
+int do_dir(char path[]) {
+  DIR *dir;
+  struct dirent *entry;
+  dir = opendir(path);
+  if (!dir) {
+    fprintf(stderr, "Could not open %s\n", path);
+    return EXIT_FAILURE;
+  }
+  chdir(path);
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (entry->d_type == DT_DIR) {
+      do_dir(entry->d_name);
+      chdir("..");
+    } else if (strstr(entry->d_name, ".json") - entry->d_name == strlen(entry->d_name) - 5) {
+      do_file(entry->d_name);
+    }
+  }
+  closedir(dir);
+  return EXIT_SUCCESS;
+}
+
+int do_file(char filename[]) {
+  size_t saved_size;
+  File file;
+  int fd;
+  struct stat sb;
+  fd = open(filename, O_RDWR); 
+  if (fd < 0) {
+    fprintf(stderr, "Could not open %s\n", filename);
+    return EXIT_FAILURE;
+  }
+  if (!quiet) {
+    printf("%s: ", filename);
+  }
+  fstat(fd, &sb);
+  file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (file.data_start == MAP_FAILED) {
+    fprintf(stderr, "Could not map file\n");
+    return EXIT_FAILURE;
+  }
+  file.rindex = file.windex = file.lindex = file.data_start;
+  file.data_end = file.data_start + sb.st_size;
+  if (file.data_end - file.data_start > 2 && (*file.data_start == 0 || *(file.data_start + 1) == 0)) {
+    fprintf(stderr, "Only UTF-8 input is currently supported\n");
+    return EXIT_FAILURE;
+  }
+  do_value(&file, newlines == 2 ? 2 : 0); // clean up leading newlines in -n mode
+  if (newlines) {
+    while (file.rindex < file.data_end) {  
+      do_value(&file, newlines);
+    }
+  }
+  write_data(&file, 0);
+  if (newlines == 1 && file.windex > file.data_start && *(file.windex - 1) == '\n') {
+    --(file.windex); // clean up trailing newline in -n mode
+  }
+  saved_size = file.data_end - file.windex;
+  if (!quiet) {
+    printf("Saved %zu bytes\n", saved_size);
+  }
+  if (msync(file.data_start, file.windex - file.data_start, MS_SYNC) < 0) {
+    fprintf(stderr, "Could not sync file\n");
+    return EXIT_FAILURE;
+  }
+  ftruncate(fd, file.windex - file.data_start);
+  return EXIT_SUCCESS;
+}
+
+void usage(char progname[], int status) {
+  fprintf(EXIT_SUCCESS ? stdout : stderr,
+          "Usage: %s [options] path\n"
+          "JSON minifier\n"
+          "Options:\n"
+          "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -n   Process NDJSON/JSON Lines\n"
+          "  -N   Process NDJSON, preserving empty lines\n"
+          "  -q   Suppress output\n", progname);
+  exit(status);
+}
+
+int main(int argc, char* argv[]) {
+  struct stat sb;
+  int opt;
+  int negative = 0;
+  precision = INT64_MAX;
+  quiet = 0;
+  newlines = 0;
+  char* i;
+  while ((opt = getopt(argc, argv, "h?qnNp:")) != -1) {
+    switch (opt) {
+      case 'h':
+      case '?':
+        usage(argv[0], EXIT_SUCCESS);
+        break;
+      case 'q':
+        quiet = 1;
+        break;
+      case 'n':
+        newlines = 1;
+        break;
+      case 'N':
+        newlines = 2;
+        break;
+      case 'p':
+        if (!optarg) {
+          usage(argv[0], EXIT_FAILURE);
+        }
+        i = optarg;
+        if (*i == '-') {
+          negative = 1;
+          ++i;
+        }
+        precision = 0;
+        for (; *i && precision < INT64_MAX; ++i) {
+          switch (*i) {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+              if (precision > INT64_MAX / 10 || (precision == INT64_MAX / 10 && *i > '7')) {
+                fprintf(stderr, "Precision limited to %lld\n", INT64_MAX);
+                precision = INT64_MAX;
+              }
+              precision = precision * 10 + *i - '0';
+              break;
+            default:
+              fprintf(stderr, "Precision must be an integer\n");
+              exit(EXIT_FAILURE);
+          }
+        }
+        if (negative) {
+          precision = -precision;
+        }
+        break;
+      default:
+        usage(argv[0], EXIT_FAILURE);
+    }
+  }
+  if (argc - optind != 1) {
+    usage(argv[0], EXIT_FAILURE);
+  }
+  stat(argv[optind], &sb);
+  if (sb.st_mode & S_IFDIR) {
+    return do_dir(argv[optind]);
+  }
+  return do_file(argv[optind]);
 }

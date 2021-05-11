@@ -23,21 +23,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 typedef struct File {
-  u_int8_t* data_start;
-  u_int8_t* rindex;
-  u_int8_t* windex;
-  u_int8_t* lindex;
-  u_int8_t* data_end;
+  uint8_t* data_start;
+  uint8_t* rindex;
+  uint8_t* windex;
+  uint8_t* lindex;
+  uint8_t* data_end;
 } File;
 
 typedef struct Bitfield {
   size_t size;
-  u_int64_t* bits;
+  uint64_t* bits;
   size_t bit_level;
   size_t byte_level;
   size_t current;
@@ -67,14 +68,14 @@ void do_literal(File* file, const char* literal, size_t length) {
   }
 }
 
-u_int64_t hex_value(File* file) {
-  u_int64_t value = 0;
+uint64_t hex_value(File* file) {
+  uint64_t value = 0;
   if (file->rindex + 4 > file->data_end) {
     return INT64_MAX;
   }
   for (size_t i = 0; i < 4; ++i) {
-    const u_int64_t x = file->rindex[i];
-    const u_int64_t shift = (3 - i) << 2;
+    const uint64_t x = file->rindex[i];
+    const uint64_t shift = (3 - i) << 2;
     if (x >= '0' && x <= '9') {
       value += ((x - '0') << shift);
     } else if (x >= 'A' && x <= 'F') {
@@ -89,8 +90,8 @@ u_int64_t hex_value(File* file) {
 }
 
 void do_unicode(File* file) {
-  u_int64_t value = hex_value(file);
-  u_int64_t value2 = 0;
+  uint64_t value = hex_value(file);
+  uint64_t value2 = 0;
   if (value == INT64_MAX) {
     fprintf(stderr, "INVALID HEX\n");
     return;
@@ -126,8 +127,8 @@ void do_unicode(File* file) {
     *file->windex++ = value;
     return;
   } else if (value < 0x800) {
-    *file->windex++ = ((u_int8_t)(value >> 6) & 0x1F) | 0xC0;
-    *file->windex++ = ((u_int8_t)(value & 0x3F)) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 6) & 0x1F) | 0xC0;
+    *file->windex++ = ((uint8_t)(value & 0x3F)) | 0x80;
     return;
   }
   if (value & 0xD800) { // surrogate pair
@@ -142,14 +143,14 @@ void do_unicode(File* file) {
     write_data(file, 4);
   }
   if (value < 0x10000) {
-    *file->windex++ = ((u_int8_t)(value >> 12) & 0xF) | 0xE0;
-    *file->windex++ = (u_int8_t)(value >> 6) & 0x3F;
-    *file->windex++ = ((u_int8_t)value & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 12) & 0xF) | 0xE0;
+    *file->windex++ = (uint8_t)(value >> 6) & 0x3F;
+    *file->windex++ = ((uint8_t)value & 0x3F) | 0x80;
   } else {
-    *file->windex++ = ((u_int8_t)(value >> 18) & 0x7) | 0xF0;
-    *file->windex++ = ((u_int8_t)(value >> 12) & 0x3F) | 0x80;
-    *file->windex++ = ((u_int8_t)(value >> 6) & 0x3F) | 0x80;
-    *file->windex++ = ((u_int8_t)value & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 18) & 0x7) | 0xF0;
+    *file->windex++ = ((uint8_t)(value >> 12) & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)(value >> 6) & 0x3F) | 0x80;
+    *file->windex++ = ((uint8_t)value & 0x3F) | 0x80;
   }
 }
 
@@ -226,24 +227,24 @@ void do_object(File* file) {
 }
 
 void do_number(File* file) {
-  u_int8_t* decimal = 0;
-  u_int8_t* exponent = 0;
-  u_int8_t* non_zero_start = 0;
-  u_int8_t* non_zero_finish = 0;
-  u_int8_t* exponent_start = 0;
-  u_int8_t* number_end = 0;
+  uint8_t* decimal = 0;
+  uint8_t* exponent = 0;
+  uint8_t* non_zero_start = 0;
+  uint8_t* non_zero_finish = 0;
+  uint8_t* exponent_start = 0;
+  uint8_t* number_end = 0;
   int64_t exponent_value = 0;
   int64_t min_exponent = 0;
   int64_t max_exponent = 0;
   int64_t new_decimal = 0;
   int64_t new_exponent = 0;
-  u_int64_t digit_width = 0;
-  u_int64_t new_exponent_width = 0;
+  uint64_t digit_width = 0;
+  uint64_t new_exponent_width = 0;
   int negative = 0;
   int negative_exponent = 0;
-  u_int64_t zeroes = 0;
-  u_int8_t* i;
-  u_int64_t multiplier = 1;
+  uint64_t zeroes = 0;
+  uint8_t* i;
+  uint64_t multiplier = 1;
   if (*file->rindex == '-') {
     negative = 1;
     ++(file->rindex);
@@ -489,15 +490,15 @@ void do_number(File* file) {
 }
 
 void init_bits(Bitfield* bitfield) {
-  bitfield->size = sizeof(u_int64_t);
-  bitfield->bits = (u_int64_t*) malloc(bitfield->size);
+  bitfield->size = sizeof(uint64_t);
+  bitfield->bits = (uint64_t*) malloc(bitfield->size);
   bitfield->bit_level = 0;
   bitfield->byte_level = 0;
   bitfield->current = -1;
 }
 
 void increment_bit(Bitfield* bitfield) {
-  if (bitfield->bit_level == sizeof(u_int64_t) * CHAR_BIT - 1) {
+  if (bitfield->bit_level == sizeof(uint64_t) * CHAR_BIT - 1) {
     bitfield->bit_level = 0;
     ++(bitfield->byte_level);
   } else {
@@ -524,7 +525,7 @@ void pop_bit(Bitfield* bitfield) {
   if (bitfield->bit_level == 0) {
     if (bitfield->byte_level > 0) {
       --(bitfield->byte_level);
-      bitfield->bit_level = sizeof(u_int64_t) * CHAR_BIT - 1;
+      bitfield->bit_level = sizeof(uint64_t) * CHAR_BIT - 1;
     }
   } else {
     --(bitfield->bit_level);
@@ -632,7 +633,7 @@ int do_dir(char path[]) {
   struct dirent *entry;
   dir = opendir(path);
   if (!dir) {
-    fprintf(stderr, "Could not open %s\n", path);
+    fprintf(stderr, "Could not open %s: %s\n", path, strerror(errno));
     return EXIT_FAILURE;
   }
   chdir(path);
@@ -652,14 +653,15 @@ int do_dir(char path[]) {
 }
 
 int do_file(char filename[]) {
-  size_t saved_size;
-  File file;
+  File file = {0};
   int fd;
-  struct stat sb;
+  struct stat sb = {0};
+  int exit_code = EXIT_SUCCESS;
   fd = open(filename, O_RDWR); 
   if (fd < 0) {
-    fprintf(stderr, "Could not open %s\n", filename);
-    return EXIT_FAILURE;
+    fprintf(stderr, "Could not open %s: %s\n", filename, strerror(errno));
+    exit_code = EXIT_FAILURE;
+    goto close_descriptors_and_return;
   }
   if (!quiet) {
     printf("%s: ", filename);
@@ -668,13 +670,15 @@ int do_file(char filename[]) {
   file.data_start = mmap(NULL, sb.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (file.data_start == MAP_FAILED) {
     fprintf(stderr, "Could not map file\n");
-    return EXIT_FAILURE;
+    exit_code = EXIT_FAILURE;
+    goto close_descriptors_and_return;
   }
   file.rindex = file.windex = file.lindex = file.data_start;
   file.data_end = file.data_start + sb.st_size;
   if (file.data_end - file.data_start > 2 && (*file.data_start == 0 || *(file.data_start + 1) == 0)) {
     fprintf(stderr, "Only UTF-8 input is currently supported\n");
-    return EXIT_FAILURE;
+    exit_code = EXIT_FAILURE;
+    goto close_descriptors_and_return;
   }
   do_value(&file, newlines == 2 ? 2 : 0); // clean up leading newlines in -n mode
   if (newlines) {
@@ -686,16 +690,28 @@ int do_file(char filename[]) {
   if (newlines == 1 && file.windex > file.data_start && *(file.windex - 1) == '\n') {
     --(file.windex); // clean up trailing newline in -n mode
   }
-  saved_size = file.data_end - file.windex;
-  if (!quiet) {
-    printf("Saved %zu bytes\n", saved_size);
-  }
   if (msync(file.data_start, file.windex - file.data_start, MS_SYNC) < 0) {
-    fprintf(stderr, "Could not sync file\n");
-    return EXIT_FAILURE;
+    fprintf(stderr, "Could not sync file: %s\n", strerror(errno));
+    exit_code = EXIT_FAILURE;
+    goto close_descriptors_and_return;
   }
-  ftruncate(fd, file.windex - file.data_start);
-  return EXIT_SUCCESS;
+  if (!quiet) {
+    printf("Saved %lu bytes\n", (unsigned long) (file.data_end - file.windex));
+  }
+
+  close_descriptors_and_return:
+  if (file.data_start != 0 && file.data_start != MAP_FAILED) {
+    munmap(file.data_start, sb.st_size);
+  }
+  if (fd >= 0) {
+    // We truncate the file here because Cygwin mmap implementation opens a new file descriptor,
+    // and ftruncate fails if that descriptor is open with a "Permission denied" error
+    if (exit_code == EXIT_SUCCESS && ftruncate(fd, file.windex - file.data_start) < 0) {
+      fprintf(stderr, "Could not truncate file to new size: %s. It may have garbage characters at the end\n", strerror(errno));
+    }
+    close(fd);
+  }
+  return exit_code;
 }
 
 void usage(char progname[], int status) {
@@ -756,7 +772,7 @@ int main(int argc, char* argv[]) {
             case '8':
             case '9':
               if (precision > INT64_MAX / 10 || (precision == INT64_MAX / 10 && *i > '7')) {
-                fprintf(stderr, "Precision limited to %lld\n", INT64_MAX);
+                fprintf(stderr, "Precision limited to %lld\n", (long long int) INT64_MAX);
                 precision = INT64_MAX;
               }
               precision = precision * 10 + *i - '0';

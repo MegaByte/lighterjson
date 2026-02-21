@@ -1,0 +1,6 @@
+{
+  "ascii": "hello",
+  "latin1": "café",
+  "emoji": "smile: \uD83D\uDE00",
+  "mixed": "a\u00E9b\u4E2D"
+}

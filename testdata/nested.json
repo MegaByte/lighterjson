@@ -1,0 +1,9 @@
+{
+  "object": {
+    "array": [ 1, 2, 3 ],
+    "nested": {
+      "deep": true
+    }
+  },
+  "array": [ [ ], [ 1 ], [ 1, 2 ] ]
+}

@@ -1,0 +1,17 @@
+{
+  "users": [
+    { "id": 1, "name": "Alice", "roles": [ "admin" ] },
+    { "id": 2, "name": "Bob", "roles": [ "user", "editor" ] },
+    { "id": 3, "name": "Carol", "roles": [ ] }
+  ],
+  "config": {
+    "debug": false,
+    "limits": { "max_depth": 32, "timeout": 1500 },
+    "flags": [ true, false, true ]
+  },
+  "nested": {
+    "inner": {
+      "leaf": 42
+    }
+  }
+}

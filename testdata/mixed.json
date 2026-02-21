@@ -1,0 +1,10 @@
+{
+  "string": "text",
+  "number": 42,
+  "float": 3.14,
+  "true": true,
+  "false": false,
+  "null": null,
+  "array": [ 1, "two", true ],
+  "object": { "inner": 1 }
+}

@@ -45,6 +45,7 @@ typedef struct LighterContext {
   int64_t precision;
   int quiet;
   int newlines;
+  int disable_nfc;
 } LighterContext;
 
 static int do_file(LighterContext* ctx, char filename[]);
@@ -70,8 +71,7 @@ void do_literal(LighterData* data, const char* literal, size_t length) {
 }
 
 static void do_string(LighterData* data, LighterContext* ctx) {
-  (void)ctx;
-  lighter_do_string(data);
+  lighter_do_string(data, ctx->disable_nfc);
 }
 
 static int do_object_label(LighterData* data, LighterContext* ctx, int line_start) {
@@ -237,43 +237,82 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
 /* Return 1 if filename should be processed: .json always; .jsonl/.ndjson when in NDJSON mode. */
 static int dir_should_process(LighterContext* ctx, const char* name) {
   size_t len = strlen(name);
-  if (len >= 5 && strcmp(name + len - 5, ".json") == 0) return 1;
-  if (ctx->newlines && len >= 6 && strcmp(name + len - 6, ".jsonl") == 0) return 1;
-  if (ctx->newlines && len >= 7 && strcmp(name + len - 7, ".ndjson") == 0) return 1;
-  return 0;
+  return (len >= 5 && strcmp(name + len - 5, ".json") == 0) ||
+         (ctx->newlines && ((len >= 6 && strcmp(name + len - 6, ".jsonl") == 0) || 
+                            (len >= 7 && strcmp(name + len - 7, ".ndjson") == 0)));
 }
 
 #if LIGHTER_PLATFORM_WIN
 static int do_dir_win(LighterContext* ctx, const char* path) {
-  char buf[4096];
-  char sub[4096];
   size_t plen = strlen(path);
-  if (plen + 4 >= sizeof(buf)) return EXIT_FAILURE;
-  memcpy(buf, path, plen + 1);
-  if (plen > 0 && path[plen - 1] != '\\' && path[plen - 1] != '/') {
-    buf[plen] = '\\';
-    buf[plen + 1] = '*';
-    buf[plen + 2] = '\0';
-  } else {
-    buf[plen] = '*';
-    buf[plen + 1] = '\0';
+  wchar_t* long_wpath = lighter_make_long_path_w(path);
+  if (!long_wpath) {
+    return EXIT_FAILURE;
   }
-  WIN32_FIND_DATAA fd;
-  HANDLE h = FindFirstFileA(buf, &fd);
+
+  size_t wplen = wcslen(long_wpath);
+  wchar_t* search_path = (wchar_t*)malloc((wplen + 3) * sizeof(wchar_t));
+  if (!search_path) {
+    free(long_wpath);
+    return EXIT_FAILURE;
+  }
+  wcscpy(search_path, long_wpath);
+
+  if (wplen > 0 && search_path[wplen - 1] != L'\\' && search_path[wplen - 1] != L'/') {
+    search_path[wplen] = L'\\';
+    search_path[wplen + 1] = L'*';
+    search_path[wplen + 2] = L'\0';
+  } else {
+    search_path[wplen] = L'*';
+    search_path[wplen + 1] = L'\0';
+  }
+  free(long_wpath);
+
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(search_path, &fd);
+  free(search_path);
+
   if (h == INVALID_HANDLE_VALUE) {
     fprintf(stderr, "Could not open %s\n", path);
     return EXIT_FAILURE;
   }
   do {
-    if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
-    if (plen + strlen(fd.cFileName) + 3 > sizeof(sub)) continue;
-    snprintf(sub, sizeof(sub), "%s%s%s", path, (plen > 0 && path[plen - 1] != '\\' && path[plen - 1] != '/') ? "\\" : "", fd.cFileName);
+    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+      continue;
+    }
+
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, NULL, 0, NULL, NULL);
+    if (ulen <= 0) {
+      continue;
+    }
+    char* utf8name = (char* )malloc(ulen);
+    if (!utf8name) {
+      continue;
+    }
+    WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, utf8name, ulen, NULL,
+                        NULL);
+
+    size_t sub_size = plen + strlen(utf8name) + 3;
+    char* sub = (char* )malloc(sub_size);
+    if (!sub) {
+      free(utf8name);
+      continue;
+    }
+
+    snprintf(sub, sub_size, "%s%s%s", path,
+             (plen > 0 && path[plen - 1] != '\\' && path[plen - 1] != '/')
+                 ? "\\"
+                 : "",
+             utf8name);
+
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
       do_dir_win(ctx, sub);
-    } else if (dir_should_process(ctx, fd.cFileName)) {
-      do_file(ctx, (char*)sub);
+    } else if (dir_should_process(ctx, utf8name)) {
+      do_file(ctx, sub);
     }
-  } while (FindNextFileA(h, &fd));
+    free(sub);
+    free(utf8name);
+  } while (FindNextFileW(h, &fd));
   FindClose(h);
   return EXIT_SUCCESS;
 }
@@ -353,23 +392,27 @@ cleanup:
 }
 
 void usage(char progname[], int status) {
-  fprintf(status == EXIT_SUCCESS ? stdout : stderr,
-          "Usage: %s [options] path\n"
-          "JSON minifier\n"
-          "Options:\n"
-          "  -p N Numeric precision (number of decimal places; can be negative)\n"
-          "  -n   Process NDJSON/JSON Lines\n"
-          "  -N   Process NDJSON, preserving empty lines\n"
-          "  -q   Suppress output\n", progname);
+  fprintf(
+      status == EXIT_SUCCESS ? stdout : stderr,
+      "Usage: %s [options] path\n"
+      "JSON minifier\n"
+      "Options:\n"
+      "  -p N Numeric precision (number of decimal places; can be negative)\n"
+      "  -n   Process NDJSON/JSON Lines\n"
+      "  -N   Process NDJSON, preserving empty lines\n"
+      "  -U   Disable Unicode normalization\n"
+      "  -q   Suppress output\n",
+      progname);
   exit(status);
 }
 
 int main(int argc, char* argv[]) {
   int negative = 0;
   LighterContext ctx = {
-    .precision = LIGHTER_PRECISION_UNLIMITED,
-    .quiet = 0,
-    .newlines = 0,
+      .precision = LIGHTER_PRECISION_UNLIMITED,
+      .quiet = 0,
+      .newlines = 0,
+      .disable_nfc = 0,
   };
   char* i;
   int optind_val = 1;
@@ -397,6 +440,9 @@ int main(int argc, char* argv[]) {
           break;
         case 'N':
           ctx.newlines = 2;
+          break;
+        case 'U':
+          ctx.disable_nfc = 1;
           break;
         case 'p': {
           if (o[1]) {
@@ -457,7 +503,12 @@ int main(int argc, char* argv[]) {
   }
 
 #if LIGHTER_PLATFORM_WIN
-  DWORD att = GetFileAttributesA(argv[optind_val]);
+  DWORD att = INVALID_FILE_ATTRIBUTES;
+  wchar_t* wpath = lighter_make_long_path_w(argv[optind_val]);
+  if (wpath) {
+    att = GetFileAttributesW(wpath);
+    free(wpath);
+  }
   if (att != INVALID_FILE_ATTRIBUTES && (att & FILE_ATTRIBUTE_DIRECTORY)) {
     return do_dir(&ctx, argv[optind_val]);
   }

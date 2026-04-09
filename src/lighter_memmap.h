@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32)
 #include <windows.h>
@@ -20,6 +21,59 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
+
+#if LIGHTER_MEMMAP_WIN
+static inline wchar_t* lighter_make_long_path_w(const char* utf8_path) {
+  int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, NULL, 0);
+  if (wlen <= 0) {
+    return NULL;
+  }
+  wchar_t* wpath = (wchar_t*)malloc(wlen * sizeof(wchar_t));
+  if (!wpath) {
+    return NULL;
+  }
+  MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wpath, wlen);
+
+  DWORD full_len = GetFullPathNameW(wpath, 0, NULL, NULL);
+  if (full_len == 0) {
+    free(wpath);
+    return NULL;
+  }
+  wchar_t* full_wpath = (wchar_t*)malloc(full_len * sizeof(wchar_t));
+  if (!full_wpath) {
+    free(wpath);
+    return NULL;
+  }
+  GetFullPathNameW(wpath, full_len, full_wpath, NULL);
+  free(wpath);
+
+  if (wcsncmp(full_wpath, L"\\\\?\\", 4) == 0 || wcsncmp(full_wpath, L"\\\\.\\", 4) == 0) {
+    return full_wpath;
+  }
+
+  size_t prefix_len = 4;
+  int is_unc = (full_wpath[0] == L'\\' && full_wpath[1] == L'\\');
+  if (is_unc) {
+    prefix_len = 8;
+  }
+
+  wchar_t* long_wpath = (wchar_t*)malloc((full_len + prefix_len) * sizeof(wchar_t));
+  if (!long_wpath) {
+    free(full_wpath);
+    return NULL;
+  }
+  
+  if (is_unc) {
+    wcscpy(long_wpath, L"\\\\?\\UNC\\");
+    wcscat(long_wpath, full_wpath + 2);
+  } else {
+    wcscpy(long_wpath, L"\\\\?\\");
+    wcscat(long_wpath, full_wpath);
+  }
+  free(full_wpath);
+  return long_wpath;
+}
 #endif
 
 typedef struct LighterMap {
@@ -40,9 +94,16 @@ typedef struct LighterMap {
  */
 static inline int lighter_map_open(LighterMap* m, const char* path, int read_only) {
 #if LIGHTER_MEMMAP_WIN
-  HANDLE h = CreateFileA(path,
+  wchar_t* wpath = lighter_make_long_path_w(path);
+  if (!wpath) {
+    fprintf(stderr, "Invalid path encoding or out of memory\n");
+    return -1;
+  }
+
+  HANDLE h = CreateFileW(wpath,
                         read_only ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE),
                         FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  free(wpath);
   if (h == INVALID_HANDLE_VALUE) {
     fprintf(stderr, "Could not open %s\n", path);
     return -1;

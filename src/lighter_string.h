@@ -139,7 +139,7 @@ static inline void lighter_string_do_escape(LighterData* data) {
 
 /** Parse and optionally NFC-normalize a JSON string. NFC data is loaded on first use
  *  when a string ends. Uses lighter_write_data to flush segments. */
-static inline void lighter_do_string(LighterData* data) {
+static inline void lighter_do_string(LighterData* data, int disable_nfc) {
   ++(data->rindex);
   while (data->rindex < data->data_end) {
     switch (*data->rindex) {
@@ -147,7 +147,7 @@ static inline void lighter_do_string(LighterData* data) {
         lighter_string_do_escape(data);
         break;
       case '"': {
-        if (nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex) != NFC_QC_YES) {
+        if (!disable_nfc && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex) != NFC_QC_YES) {
           ptrdiff_t pending = data->rindex - data->lindex;
           lighter_write_data(data, 0);
           uint8_t* str_content_start = data->windex - pending + 1;

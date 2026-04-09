@@ -63,7 +63,7 @@ static inline wchar_t* lighter_make_long_path_w(const char* utf8_path) {
     free(full_wpath);
     return NULL;
   }
-  
+
   if (is_unc) {
     wcscpy(long_wpath, L"\\\\?\\UNC\\");
     wcscat(long_wpath, full_wpath + 2);
@@ -100,9 +100,7 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
     return -1;
   }
 
-  HANDLE h = CreateFileW(wpath,
-                        read_only ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE),
-                        FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE h = CreateFileW(wpath, read_only ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE), FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   free(wpath);
   if (h == INVALID_HANDLE_VALUE) {
     fprintf(stderr, "Could not open %s\n", path);
@@ -153,10 +151,7 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
     return -1;
   }
   m->size = (size_t)sb.st_size;
-  m->data = (uint8_t*)mmap(NULL, m->size,
-                          read_only ? PROT_READ : (PROT_READ | PROT_WRITE),
-                          read_only ? MAP_PRIVATE : MAP_SHARED,
-                          m->fd, 0);
+  m->data = (uint8_t*)mmap(NULL, m->size, read_only ? PROT_READ : (PROT_READ | PROT_WRITE), read_only ? MAP_PRIVATE : MAP_SHARED, m->fd, 0);
   if (m->data == MAP_FAILED) {
     fprintf(stderr, "Could not map file\n");
     close(m->fd);
@@ -171,11 +166,12 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
 /**
  * Flush the first len bytes of the mapping to disk.
  */
-static inline int lighter_map_sync(LighterMap* m, size_t len) {
+static inline int lighter_map_sync(LighterMap* m, size_t len, int async_io) {
 #if LIGHTER_MEMMAP_WIN
+  (void)async_io;
   return FlushViewOfFile(m->data, len) ? 0 : -1;
 #else
-  return msync(m->data, len, MS_SYNC);
+  return msync(m->data, len, async_io ? MS_ASYNC : MS_SYNC);
 #endif
 }
 

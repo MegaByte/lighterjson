@@ -13,18 +13,18 @@
 #include <string.h>
 
 #include "lighter_common.h"
-#include "unicode_nfc_shared.h"
 #include "unicode_nfc_runtime.h"
+#include "unicode_nfc_shared.h"
 
 /* \uXXXX = 4 hex digits; UTF-8 and surrogate boundaries (Unicode). */
-#define UNICODE_ESCAPE_HEX_LEN  4
-#define UTF8_ASCII_MAX           0x80u
-#define UTF8_2BYTE_MAX           0x800u
-#define UTF8_3BYTE_MAX           0x10000u
-#define SURROGATE_HIGH_START     0xD800u
-#define SURROGATE_LOW_START      0xDC00u
-#define SURROGATE_MASK           0x3FFu
-#define SURROGATE_OFFSET         0x10000u
+#define UNICODE_ESCAPE_HEX_LEN 4
+#define UTF8_ASCII_MAX 0x80u
+#define UTF8_2BYTE_MAX 0x800u
+#define UTF8_3BYTE_MAX 0x10000u
+#define SURROGATE_HIGH_START 0xD800u
+#define SURROGATE_LOW_START 0xDC00u
+#define SURROGATE_MASK 0x3FFu
+#define SURROGATE_OFFSET 0x10000u
 
 static inline uint64_t lighter_string_hex_value(LighterData* data) {
   uint64_t value = 0;
@@ -54,7 +54,7 @@ static inline void lighter_string_do_unicode(LighterData* data) {
     fprintf(stderr, "INVALID HEX\n");
     return;
   }
-  if (value < 0x20) {  /* C0 controls */
+  if (value < 0x20) { /* C0 controls */
     *data->windex++ = '\\';
     switch ((unsigned)value) {
       case '\b':
@@ -90,13 +90,13 @@ static inline void lighter_string_do_unicode(LighterData* data) {
     *data->windex++ = ((uint8_t)(value & 0x3F)) | 0x80;
     return;
   }
-  if (value >= SURROGATE_HIGH_START) {  /* possible high surrogate; check for pair */
+  if (value >= SURROGATE_HIGH_START) { /* possible high surrogate; check for pair */
     value2 = lighter_string_hex_value(data);
     if (value2 == (uint64_t)INT64_MAX) {
       fprintf(stderr, "INVALID HEX\n");
       return;
     }
-    if (value2 >= SURROGATE_LOW_START && value2 <= SURROGATE_LOW_START + SURROGATE_MASK) {  /* low surrogate */
+    if (value2 >= SURROGATE_LOW_START && value2 <= SURROGATE_LOW_START + SURROGATE_MASK) { /* low surrogate */
       value = (((value & SURROGATE_MASK) << 10) | (value2 & SURROGATE_MASK)) + SURROGATE_OFFSET;
     }
     lighter_write_data(data, UNICODE_ESCAPE_HEX_LEN);
@@ -117,7 +117,7 @@ static inline void lighter_string_do_escape(LighterData* data) {
   if (data->rindex + 1 < data->data_end) {
     switch (data->rindex[1]) {
       case 'u':
-        lighter_write_data(data, 2);  /* \u */
+        lighter_write_data(data, 2); /* \u */
         lighter_string_do_unicode(data);
         break;
       case '"':
@@ -142,6 +142,17 @@ static inline void lighter_string_do_escape(LighterData* data) {
 static inline void lighter_do_string(LighterData* data, int disable_nfc) {
   ++(data->rindex);
   while (data->rindex < data->data_end) {
+    while (data->rindex + 8 <= data->data_end) {
+      uint64_t v;
+      memcpy(&v, data->rindex, 8);
+      if (lighter_has_byte(v, '"') || lighter_has_byte(v, '\\')) {
+        break;
+      }
+      data->rindex += 8;
+    }
+    if (data->rindex >= data->data_end)
+      break;
+
     switch (*data->rindex) {
       case '\\':
         lighter_string_do_escape(data);
@@ -152,8 +163,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc) {
           lighter_write_data(data, 0);
           uint8_t* str_content_start = data->windex - pending + 1;
           uint8_t* str_content_end = data->windex - 1;
-          uint8_t* new_end = nfc_normalize_utf8_incremental(
-              nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
+          uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
           memmove(new_end, data->windex - 1, 1);
           data->windex = new_end + 1;
         } else {

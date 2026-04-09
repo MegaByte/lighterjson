@@ -46,24 +46,50 @@ typedef struct LighterContext {
   int quiet;
   int newlines;
   int disable_nfc;
+  int async_io;
 } LighterContext;
 
+typedef struct PathBuffer {
+  char* buf;
+  size_t cap;
+} PathBuffer;
+
 static int do_file(LighterContext* ctx, char filename[]);
-static int do_dir(LighterContext* ctx, char path[]);
+static int do_dir(LighterContext* ctx, PathBuffer* pb);
 
 // Skip a run of whitespace; when include_newline is 0 (JSONL) don't include \n so case '\n' can handle it
 void skip_whitespace_run(LighterData* data, int include_newline) {
   uint8_t* run = data->rindex;
   if (include_newline) {
-    while (run < data->data_end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r')) ++run;
+    while (run + 8 <= data->data_end) {
+      uint64_t v;
+      memcpy(&v, run, 8);
+      if (v == 0x2020202020202020ULL || v == 0x0A0A0A0A0A0A0A0AULL) {
+        run += 8;
+      } else {
+        break;
+      }
+    }
+    while (run < data->data_end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r'))
+      ++run;
   } else {
-    while (run < data->data_end && (*run == ' ' || *run == '\t' || *run == '\r')) ++run;
+    while (run + 8 <= data->data_end) {
+      uint64_t v;
+      memcpy(&v, run, 8);
+      if (v == 0x2020202020202020ULL) {
+        run += 8;
+      } else {
+        break;
+      }
+    }
+    while (run < data->data_end && (*run == ' ' || *run == '\t' || *run == '\r'))
+      ++run;
   }
   lighter_write_data(data, run - data->rindex);
 }
 
 void do_literal(LighterData* data, const char* literal, size_t length) {
-  if (strncmp((char*) data->rindex, literal, length)) {
+  if (strncmp((char*)data->rindex, literal, length)) {
     lighter_write_data(data, length);
   } else {
     data->rindex += length;
@@ -108,9 +134,9 @@ static void do_object(LighterData* data, LighterContext* ctx, int line_start) {
   while (data->rindex < data->data_end) {
     switch (*data->rindex) {
       case ':':
-        lighter_write_data(data, 0);   /* copy any pending (key or whitespace) */
+        lighter_write_data(data, 0); /* copy any pending (key or whitespace) */
         ++(data->rindex);
-        lighter_write_data(data, 0);   /* copy colon so we never advance past what we copy */
+        lighter_write_data(data, 0); /* copy colon so we never advance past what we copy */
         return;
       case '\n':
         if (line_start) {
@@ -226,11 +252,13 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
       case '\r':
         skip_whitespace_run(data, line_start ? 0 : 1);
         break;
-      default: // invalid
+      default:  // invalid
         lighter_write_data(data, 1);
     }
   }
-  free(parent_types.bits);
+  if (parent_types.bits != &parent_types.initial_bits) {
+    free(parent_types.bits);
+  }
   return 0;
 }
 
@@ -238,14 +266,13 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
 static int dir_should_process(LighterContext* ctx, const char* name) {
   size_t len = strlen(name);
   return (len >= 5 && strcmp(name + len - 5, ".json") == 0) ||
-         (ctx->newlines && ((len >= 6 && strcmp(name + len - 6, ".jsonl") == 0) || 
-                            (len >= 7 && strcmp(name + len - 7, ".ndjson") == 0)));
+         (ctx->newlines && ((len >= 6 && strcmp(name + len - 6, ".jsonl") == 0) || (len >= 7 && strcmp(name + len - 7, ".ndjson") == 0)));
 }
 
 #if LIGHTER_PLATFORM_WIN
-static int do_dir_win(LighterContext* ctx, const char* path) {
-  size_t plen = strlen(path);
-  wchar_t* long_wpath = lighter_make_long_path_w(path);
+static int do_dir_win(LighterContext* ctx, PathBuffer* pb) {
+  size_t plen = strlen(pb->buf);
+  wchar_t* long_wpath = lighter_make_long_path_w(pb->buf);
   if (!long_wpath) {
     return EXIT_FAILURE;
   }
@@ -273,7 +300,7 @@ static int do_dir_win(LighterContext* ctx, const char* path) {
   free(search_path);
 
   if (h == INVALID_HANDLE_VALUE) {
-    fprintf(stderr, "Could not open %s\n", path);
+    fprintf(stderr, "Could not open %s\n", pb->buf);
     return EXIT_FAILURE;
   }
   do {
@@ -285,60 +312,65 @@ static int do_dir_win(LighterContext* ctx, const char* path) {
     if (ulen <= 0) {
       continue;
     }
-    char* utf8name = (char* )malloc(ulen);
-    if (!utf8name) {
-      continue;
-    }
-    WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, utf8name, ulen, NULL,
-                        NULL);
 
-    size_t sub_size = plen + strlen(utf8name) + 3;
-    char* sub = (char* )malloc(sub_size);
-    if (!sub) {
-      free(utf8name);
-      continue;
+    if (plen + ulen + 2 > pb->cap) {
+      pb->cap = (plen + ulen + 2) * 2;
+      pb->buf = (char*)realloc(pb->buf, pb->cap);
     }
 
-    snprintf(sub, sub_size, "%s%s%s", path,
-             (plen > 0 && path[plen - 1] != '\\' && path[plen - 1] != '/')
-                 ? "\\"
-                 : "",
-             utf8name);
+    if (plen > 0 && pb->buf[plen - 1] != '\\' && pb->buf[plen - 1] != '/') {
+      pb->buf[plen] = '\\';
+      WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, pb->buf + plen + 1, ulen, NULL, NULL);
+    } else {
+      WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, pb->buf + plen, ulen, NULL, NULL);
+    }
 
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      do_dir_win(ctx, sub);
-    } else if (dir_should_process(ctx, utf8name)) {
-      do_file(ctx, sub);
+      do_dir_win(ctx, pb);
+    } else if (dir_should_process(ctx, pb->buf)) {
+      do_file(ctx, pb->buf);
     }
-    free(sub);
-    free(utf8name);
+    pb->buf[plen] = '\0';
   } while (FindNextFileW(h, &fd));
   FindClose(h);
   return EXIT_SUCCESS;
 }
-static int do_dir(LighterContext* ctx, char path[]) {
-  return do_dir_win(ctx, path);
+static int do_dir(LighterContext* ctx, PathBuffer* pb) {
+  return do_dir_win(ctx, pb);
 }
 #else
-static int do_dir(LighterContext* ctx, char path[]) {
-  DIR *dir;
-  struct dirent *entry;
-  dir = opendir(path);
+static int do_dir(LighterContext* ctx, PathBuffer* pb) {
+  DIR* dir = opendir(pb->buf);
   if (!dir) {
-    fprintf(stderr, "Could not open %s: %s\n", path, strerror(errno));
+    fprintf(stderr, "Could not open %s: %s\n", pb->buf, strerror(errno));
     return EXIT_FAILURE;
   }
-  chdir(path);
+  size_t plen = strlen(pb->buf);
+  struct dirent* entry;
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-    if (entry->d_type == DT_DIR) {
-      do_dir(ctx, entry->d_name);
-      chdir("..");
-    } else if (dir_should_process(ctx, entry->d_name)) {
-      do_file(ctx, entry->d_name);
+
+    size_t elen = strlen(entry->d_name);
+    if (plen + elen + 2 > pb->cap) {
+      pb->cap = (plen + elen + 2) * 2;
+      pb->buf = (char*)realloc(pb->buf, pb->cap);
     }
+
+    if (plen > 0 && pb->buf[plen - 1] != '/') {
+      pb->buf[plen] = '/';
+      strcpy(pb->buf + plen + 1, entry->d_name);
+    } else {
+      strcpy(pb->buf + plen, entry->d_name);
+    }
+
+    if (entry->d_type == DT_DIR) {
+      do_dir(ctx, pb);
+    } else if (dir_should_process(ctx, pb->buf)) {
+      do_file(ctx, pb->buf);
+    }
+    pb->buf[plen] = '\0';
   }
   closedir(dir);
   return EXIT_SUCCESS;
@@ -375,7 +407,7 @@ static int do_file(LighterContext* ctx, char filename[]) {
   }
 
   size_t written = (size_t)(data.windex - data.data_start);
-  if (written > 0 && lighter_map_sync(&map, written) != 0) {
+  if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {
     fprintf(stderr, "Could not sync file\n");
     exit_code = EXIT_FAILURE;
   }
@@ -392,17 +424,17 @@ cleanup:
 }
 
 void usage(char progname[], int status) {
-  fprintf(
-      status == EXIT_SUCCESS ? stdout : stderr,
-      "Usage: %s [options] path\n"
-      "JSON minifier\n"
-      "Options:\n"
-      "  -p N Numeric precision (number of decimal places; can be negative)\n"
-      "  -n   Process NDJSON/JSON Lines\n"
-      "  -N   Process NDJSON, preserving empty lines\n"
-      "  -U   Disable Unicode normalization\n"
-      "  -q   Suppress output\n",
-      progname);
+  fprintf(status == EXIT_SUCCESS ? stdout : stderr,
+          "Usage: %s [options] path\n"
+          "JSON minifier\n"
+          "Options:\n"
+          "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -n   Process NDJSON/JSON Lines\n"
+          "  -N   Process NDJSON, preserving empty lines\n"
+          "  -a   Use asynchronous memory mapped I/O\n"
+          "  -U   Disable Unicode normalization\n"
+          "  -q   Suppress output\n",
+          progname);
   exit(status);
 }
 
@@ -413,6 +445,7 @@ int main(int argc, char* argv[]) {
       .quiet = 0,
       .newlines = 0,
       .disable_nfc = 0,
+      .async_io = 0,
   };
   char* i;
   int optind_val = 1;
@@ -444,6 +477,9 @@ int main(int argc, char* argv[]) {
         case 'U':
           ctx.disable_nfc = 1;
           break;
+        case 'a':
+          ctx.async_io = 1;
+          break;
         case 'p': {
           if (o[1]) {
             i = o + 1;
@@ -472,7 +508,7 @@ int main(int argc, char* argv[]) {
               case '8':
               case '9':
                 if (ctx.precision > LIGHTER_PRECISION_UNLIMITED / 10 || (ctx.precision == LIGHTER_PRECISION_UNLIMITED / 10 && *i > '7')) {
-                  fprintf(stderr, "Precision limited to %lld\n", (long long) LIGHTER_PRECISION_UNLIMITED);
+                  fprintf(stderr, "Precision limited to %lld\n", (long long)LIGHTER_PRECISION_UNLIMITED);
                   ctx.precision = LIGHTER_PRECISION_UNLIMITED;
                 }
                 ctx.precision = ctx.precision * 10 + *i - '0';
@@ -510,12 +546,34 @@ int main(int argc, char* argv[]) {
     free(wpath);
   }
   if (att != INVALID_FILE_ATTRIBUTES && (att & FILE_ATTRIBUTE_DIRECTORY)) {
-    return do_dir(&ctx, argv[optind_val]);
+    PathBuffer pb;
+    pb.cap = 4096;
+    size_t arg_len = strlen(argv[optind_val]);
+    if (arg_len + 1 > pb.cap)
+      pb.cap = arg_len + 1;
+    pb.buf = (char*)malloc(pb.cap);
+    if (!pb.buf)
+      return EXIT_FAILURE;
+    strcpy(pb.buf, argv[optind_val]);
+    int ret = do_dir(&ctx, &pb);
+    free(pb.buf);
+    return ret;
   }
 #else
   struct stat sb;
   if (stat(argv[optind_val], &sb) == 0 && (sb.st_mode & S_IFDIR)) {
-    return do_dir(&ctx, argv[optind_val]);
+    PathBuffer pb;
+    pb.cap = 4096;
+    size_t arg_len = strlen(argv[optind_val]);
+    if (arg_len + 1 > pb.cap)
+      pb.cap = arg_len + 1;
+    pb.buf = (char*)malloc(pb.cap);
+    if (!pb.buf)
+      return EXIT_FAILURE;
+    strcpy(pb.buf, argv[optind_val]);
+    int ret = do_dir(&ctx, &pb);
+    free(pb.buf);
+    return ret;
   }
 #endif
   return do_file(&ctx, argv[optind_val]);

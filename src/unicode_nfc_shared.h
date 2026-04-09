@@ -34,9 +34,9 @@ static inline int nfc_bounds_ok(size_t offset, size_t len, size_t size) {
 #define NFC_BLOCK_COUNT (NFC_MAX_CP >> NFC_BLOCK_SHIFT)
 
 typedef enum {
-  NFC_QC_YES   = 0,
+  NFC_QC_YES = 0,
   NFC_QC_MAYBE = 1,
-  NFC_QC_NO    = 2,
+  NFC_QC_NO = 2,
 } NfcQc;
 
 #define NFC_SEG_MAX 128
@@ -54,22 +54,22 @@ typedef enum {
 #define NFC_DECOMP_MAX 2
 /* decomp_data on disk: 1 byte length + 3 bytes per code point per record. */
 #define NFC_DECOMP_RECORD_LEN_BYTES 1
-#define NFC_DECOMP_CP_BYTES         3
+#define NFC_DECOMP_CP_BYTES 3
 
 /* Sparse decomp table: 3 bytes cp + 3 bytes idx per entry (must match binary format). */
 #define NFC_DECOMP_SPARSE_ENTRY_BYTES 6
 /* Stage1 trie: 32 blocks per chunk (bit-packed in binary). */
-#define NFC_STAGE1_CHUNK_ENTRIES  32
-#define NFC_STAGE1_CHUNK_BITS     5
+#define NFC_STAGE1_CHUNK_ENTRIES 32
+#define NFC_STAGE1_CHUNK_BITS 5
 /* Binary format header size (must match gen_unicode_tables output). */
-#define NFC_HEADER_SIZE           96
+#define NFC_HEADER_SIZE 96
 /* Comp table: 8 bytes per entry on disk (3×21-bit code points). */
-#define NFC_COMP_ENTRY_BYTES      8
-#define NFC_COMP_CP_BITS          21
-#define NFC_COMP_CP_MASK          ((1u << NFC_COMP_CP_BITS) - 1u)
+#define NFC_COMP_ENTRY_BYTES 8
+#define NFC_COMP_CP_BITS 21
+#define NFC_COMP_CP_MASK ((1u << NFC_COMP_CP_BITS) - 1u)
 /* Comp hash table size bounds (runtime loader). */
-#define NFC_COMP_HASH_MIN         256u
-#define NFC_COMP_HASH_MAX         2048u
+#define NFC_COMP_HASH_MIN 256u
+#define NFC_COMP_HASH_MAX 2048u
 
 typedef struct {
   uint32_t starter;
@@ -103,7 +103,7 @@ typedef struct {
   uint8_t* qc_dense;
   NfcCompEntry* comp_hash;
   size_t comp_hash_cap;
-  LighterMap map;  /* read-only mapping for binary loader; kept for lifetime of NfcData */
+  LighterMap map; /* read-only mapping for binary loader; kept for lifetime of NfcData */
 } NfcData;
 
 static inline uint32_t nfc_decomp_sparse_cp(const NfcData* d, size_t i) {

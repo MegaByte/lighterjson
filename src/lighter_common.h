@@ -22,6 +22,15 @@ typedef struct LighterData {
   uint8_t* data_end;
 } LighterData;
 
+static inline int lighter_has_zero_byte(uint64_t v) {
+  return ((v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL) != 0;
+}
+
+static inline int lighter_has_byte(uint64_t v, uint8_t c) {
+  uint64_t mask = 0x0101010101010101ULL * c;
+  return lighter_has_zero_byte(v ^ mask);
+}
+
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */
 static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset) {
   memmove(data->windex, data->lindex, (size_t)(data->rindex - data->lindex));

@@ -121,8 +121,14 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
   if (negative_exponent) {
     exponent_value *= -1;
   }
-  max_exponent = (int64_t)(decimal ? decimal > non_zero_start ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_start + exponent_value;
-  min_exponent = (int64_t)(decimal ? decimal > non_zero_finish ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_finish + exponent_value;
+  max_exponent = (int64_t)(decimal    ? decimal > non_zero_start ? decimal - 1 : decimal
+                           : exponent ? exponent - 1
+                                      : number_end) -
+                 (int64_t)non_zero_start + exponent_value;
+  min_exponent = (int64_t)(decimal    ? decimal > non_zero_finish ? decimal - 1 : decimal
+                           : exponent ? exponent - 1
+                                      : number_end) -
+                 (int64_t)non_zero_finish + exponent_value;
 
   if (-precision > max_exponent) {
     if (negative) {

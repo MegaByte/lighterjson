@@ -5,10 +5,10 @@
  */
 #ifndef UNICODE_NFC_BUILDER_H
 #define UNICODE_NFC_BUILDER_H
-#include "unicode_nfc_shared.h"
 #include <stdlib.h>
 #include <string.h>
 
+#include "unicode_nfc_shared.h"
 
 static int nfc_parse_hex(const char* s, uint32_t* cp) {
   *cp = 0;
@@ -44,9 +44,7 @@ static const char* nfc_skip_ws(const char* s) {
 
 /* ── Trie builder ──────────────────────────────────────────────────── */
 
-static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks,
-                                uint8_t def_val, uint16_t** offsets,
-                                uint8_t** val, uint8_t** chk) {
+static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks, uint8_t def_val, uint16_t** offsets, uint8_t** val, uint8_t** chk) {
   /* Row Displacement Compression */
   /* Estimate size: at least blocks * 256? No, usually much smaller. Start big
    * then realloc? */
@@ -72,7 +70,7 @@ static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks,
       /* fits? */
       int fits = 1;
       for (int i = 0; i < NFC_BLOCK_SIZE; ++i) {
-        if (blk_data[i] != def_val) { /* Non-default value needs empty slot */
+        if (blk_data[i] != def_val) {    /* Non-default value needs empty slot */
           if ((*chk)[off + i] != 0xFF) { /* Slot occupied */
             fits = 0;
             break;
@@ -121,10 +119,7 @@ static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks,
    * needed perfectly. */
 }
 
-static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1,
-                               uint16_t** s2_off, uint8_t** s2_val,
-                               uint8_t** s2_chk, uint16_t* blocks,
-                               uint8_t def) {
+static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1, uint16_t** s2_off, uint8_t** s2_val, uint8_t** s2_chk, uint16_t* blocks, uint8_t def) {
   *stage1 = (uint8_t*)calloc(NFC_BLOCK_COUNT, sizeof(uint8_t));
   uint8_t* tmp = (uint8_t*)malloc((size_t)NFC_BLOCK_COUNT * NFC_BLOCK_SIZE);
   uint16_t unique = 0;
@@ -140,9 +135,7 @@ static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1,
     }
     if (found == unique) {
       if (unique >= 256) {
-        fprintf(stderr,
-                "Error: too many unique Trie blocks for uint8_t index (%u)\n",
-                unique);
+        fprintf(stderr, "Error: too many unique Trie blocks for uint8_t index (%u)\n", unique);
         exit(1);
       }
       memcpy(tmp + unique * NFC_BLOCK_SIZE, blk, NFC_BLOCK_SIZE);
@@ -159,16 +152,13 @@ static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1,
   free(tmp);
 }
 
-static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc,
-                           const uint8_t* raw_qc) {
+static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc, const uint8_t* raw_qc) {
   uint8_t* s1_ccc = NULL;
   uint8_t* s1_qc = NULL;
 
   /* Build Stage 2 (and get raw Stage 1) */
-  nfc_build_one_trie(raw_ccc, &s1_ccc, &d->stage2_ccc_off, &d->stage2_ccc_val,
-                     &d->stage2_ccc_chk, &d->stage2_blocks_ccc, 0);
-  nfc_build_one_trie(raw_qc, &s1_qc, &d->stage2_qc_off, &d->stage2_qc_val,
-                     &d->stage2_qc_chk, &d->stage2_blocks_qc, NFC_QC_YES);
+  nfc_build_one_trie(raw_ccc, &s1_ccc, &d->stage2_ccc_off, &d->stage2_ccc_val, &d->stage2_ccc_chk, &d->stage2_blocks_ccc, 0);
+  nfc_build_one_trie(raw_qc, &s1_qc, &d->stage2_qc_off, &d->stage2_qc_val, &d->stage2_qc_chk, &d->stage2_blocks_qc, NFC_QC_YES);
 
   /* Compress Stage 1 into Combined 3-Stage Trie */
   /* Map (ccc_block, qc_block) -> pair_id */
@@ -209,7 +199,7 @@ static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc,
   memcpy(d->pair_map_qc, pair_qc, num_pairs);
 
   /* Compress block_pairs into chunks of 32 */
-  int num_chunks_raw = NFC_BLOCK_COUNT / 32;         /* 136 */
+  int num_chunks_raw = NFC_BLOCK_COUNT / 32;        /* 136 */
   d->stage1_top = (uint8_t*)malloc(num_chunks_raw); /* Top index */
 
   /* Deduplicate chunks */
@@ -255,8 +245,7 @@ static int nfc_build_comp_cmp(const void* a, const void* b) {
   return (ea->combining < eb->combining) ? -1 : 1;
 }
 
-static void nfc_build_comp_table(NfcData* d, const uint8_t* raw_ccc,
-                                 const uint8_t* comp_excl) {
+static void nfc_build_comp_table(NfcData* d, const uint8_t* raw_ccc, const uint8_t* comp_excl) {
   /* Count composable pairs */
   size_t count = 0;
   for (uint32_t cp = 0; cp < NFC_MAX_CP; ++cp) {
@@ -277,7 +266,7 @@ static void nfc_build_comp_table(NfcData* d, const uint8_t* raw_ccc,
   }
 
   /* Allocate dense array */
-  d->comp_table = (NfcCompEntry *)malloc(count * sizeof(NfcCompEntry));
+  d->comp_table = (NfcCompEntry*)malloc(count * sizeof(NfcCompEntry));
   d->comp_size = count;
   size_t added = 0;
 
@@ -333,210 +322,208 @@ static NfcData* nfc_load_from_ucd(const char* ucd_dir) {
   d->decomp_data_len = 1;
 
   do {
-  /* ── UnicodeData.txt ──────────────────────────────────────────── */
-  {
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/UnicodeData.txt", ucd_dir);
-    LighterMap map = {0};
-    if (lighter_map_open(&map, path, 1) != 0) {
-      break;
-    }
-    const char* data = (const char*)map.data;
-    size_t fsize = map.size;
-    const char* p = data;
-    const char* fend = data + fsize;
-    while (p < fend) {
-      uint32_t cp;
-      const char* f;
-      const char* f5;
-      int consumed = nfc_parse_hex(p, &cp);
-
-      if (!consumed || cp >= NFC_MAX_CP) {
-        nfc_skip_to_next_line(&p, fend);
-        continue;
+    /* ── UnicodeData.txt ──────────────────────────────────────────── */
+    {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/UnicodeData.txt", ucd_dir);
+      LighterMap map = {0};
+      if (lighter_map_open(&map, path, 1) != 0) {
+        break;
       }
-
-      /* Field 3: CCC */
-      f = p;
-      for (int i = 0; i < 3; ++i) {
-        f = nfc_next_field(f);
-      }
-      {
-        const char* s = nfc_skip_ws(f);
-        uint32_t ccc = 0;
-        while (*s >= '0' && *s <= '9') {
-          ccc = ccc * 10 + (uint32_t)(*s++ - '0');
-        }
-        raw_ccc[cp] = (uint8_t)(ccc > 254 ? 254 : ccc);
-      }
-
-      /* Field 5: Decomposition mapping */
-      f5 = f;
-      for (int i = 0; i < 2; ++i) {
-        f5 = nfc_next_field(f5);
-      }
-      {
-        const char* s = nfc_skip_ws(f5);
-        if (*s == '<') {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-        if (*s == ';' || *s == '\n' || *s == '\r') {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-
-        uint32_t parts[NFC_DECOMP_MAX];
-        int nparts = 0;
-        while (nparts < NFC_DECOMP_MAX) {
-          s = nfc_skip_ws(s);
-          if (!*s || *s == ';' || *s == '\n' || *s == '\r') {
-            break;
-          }
-          uint32_t dcp;
-          int c = nfc_parse_hex(s, &dcp);
-          if (!c) {
-            break;
-          }
-          parts[nparts++] = dcp;
-          s += c;
-        }
-        if (nparts > 0) {
-          size_t need = d->decomp_data_len + 1 + (size_t)nparts;
-          while (need > decomp_cap) {
-            decomp_cap *= 2;
-            d->decomp_data = (uint32_t*)realloc(d->decomp_data,
-                                                decomp_cap * sizeof(uint32_t));
-          }
-          d->decomp_idx[cp] = (uint32_t)d->decomp_data_len;
-          d->decomp_data[d->decomp_data_len++] = (uint32_t)nparts;
-          for (int i = 0; i < nparts; ++i) {
-            d->decomp_data[d->decomp_data_len++] = parts[i];
-          }
-        }
-      }
-
-      nfc_skip_to_next_line(&p, fend);
-    }
-    lighter_map_close(&map);
-  }
-
-  /* ── DerivedNormalizationProps.txt (NFC_QC) ───────────────────── */
-  {
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/DerivedNormalizationProps.txt", ucd_dir);
-    LighterMap map = {0};
-    if (lighter_map_open(&map, path, 1) == 0) {
-      const char* data = (const char*)map.data;
-      size_t fsize = map.size;
-      const char* p = data;
-      const char* fend = data + fsize;
-      while (p < fend) {
-        uint32_t first, last;
-        int c;
-        const char* s = nfc_skip_ws(p);
-
-        if (*s == '#' || *s == '\n' || *s == '\r') {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-
-        c = nfc_parse_hex(s, &first);
-        if (!c) {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-        s += c;
-        if (s[0] == '.' && s[1] == '.') {
-          s += 2;
-          c = nfc_parse_hex(s, &last);
-          s += c;
-        } else {
-          last = first;
-        }
-        s = nfc_skip_ws(s);
-        if (*s == ';') {
-          ++s;
-        }
-        s = nfc_skip_ws(s);
-        if (strncmp(s, "NFC_QC", 6)) {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-        s += 6;
-        s = nfc_skip_ws(s);
-        if (*s == ';') {
-          ++s;
-        }
-        s = nfc_skip_ws(s);
-
-        uint8_t qv = NFC_QC_YES;
-        if (*s == 'N') {
-          qv = NFC_QC_NO;
-        }
-        else if (*s == 'M')
-          qv = NFC_QC_MAYBE;
-        else {
-          nfc_skip_to_next_line(&p, fend);
-          continue;
-        }
-
-        for (uint32_t cp = first; cp <= last && cp < NFC_MAX_CP; ++cp) {
-          raw_qc[cp] = qv;
-        }
-
-        nfc_skip_to_next_line(&p, fend);
-      }
-      lighter_map_close(&map);
-    }
-  }
-
-  /* ── CompositionExclusions.txt ────────────────────────────────── */
-  {
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/CompositionExclusions.txt", ucd_dir);
-    LighterMap map = {0};
-    if (lighter_map_open(&map, path, 1) == 0) {
       const char* data = (const char*)map.data;
       size_t fsize = map.size;
       const char* p = data;
       const char* fend = data + fsize;
       while (p < fend) {
         uint32_t cp;
-        int c;
-        const char* s = nfc_skip_ws(p);
+        const char* f;
+        const char* f5;
+        int consumed = nfc_parse_hex(p, &cp);
 
-        if (*s == '#' || *s == '\n' || *s == '\r') {
+        if (!consumed || cp >= NFC_MAX_CP) {
           nfc_skip_to_next_line(&p, fend);
           continue;
         }
-        c = nfc_parse_hex(s, &cp);
-        if (c > 0 && cp < NFC_MAX_CP) {
-          comp_excl[cp] = 1;
+
+        /* Field 3: CCC */
+        f = p;
+        for (int i = 0; i < 3; ++i) {
+          f = nfc_next_field(f);
+        }
+        {
+          const char* s = nfc_skip_ws(f);
+          uint32_t ccc = 0;
+          while (*s >= '0' && *s <= '9') {
+            ccc = ccc * 10 + (uint32_t)(*s++ - '0');
+          }
+          raw_ccc[cp] = (uint8_t)(ccc > 254 ? 254 : ccc);
+        }
+
+        /* Field 5: Decomposition mapping */
+        f5 = f;
+        for (int i = 0; i < 2; ++i) {
+          f5 = nfc_next_field(f5);
+        }
+        {
+          const char* s = nfc_skip_ws(f5);
+          if (*s == '<') {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+          if (*s == ';' || *s == '\n' || *s == '\r') {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+
+          uint32_t parts[NFC_DECOMP_MAX];
+          int nparts = 0;
+          while (nparts < NFC_DECOMP_MAX) {
+            s = nfc_skip_ws(s);
+            if (!*s || *s == ';' || *s == '\n' || *s == '\r') {
+              break;
+            }
+            uint32_t dcp;
+            int c = nfc_parse_hex(s, &dcp);
+            if (!c) {
+              break;
+            }
+            parts[nparts++] = dcp;
+            s += c;
+          }
+          if (nparts > 0) {
+            size_t need = d->decomp_data_len + 1 + (size_t)nparts;
+            while (need > decomp_cap) {
+              decomp_cap *= 2;
+              d->decomp_data = (uint32_t*)realloc(d->decomp_data, decomp_cap * sizeof(uint32_t));
+            }
+            d->decomp_idx[cp] = (uint32_t)d->decomp_data_len;
+            d->decomp_data[d->decomp_data_len++] = (uint32_t)nparts;
+            for (int i = 0; i < nparts; ++i) {
+              d->decomp_data[d->decomp_data_len++] = parts[i];
+            }
+          }
         }
 
         nfc_skip_to_next_line(&p, fend);
       }
       lighter_map_close(&map);
     }
-  }
 
-  /* Exclude singletons from composition */
-  for (uint32_t cp = 0; cp < NFC_MAX_CP; ++cp) {
-    uint32_t idx = d->decomp_idx[cp];
-    if (idx && d->decomp_data[idx] == 1) {
-      comp_excl[cp] = 1;
+    /* ── DerivedNormalizationProps.txt (NFC_QC) ───────────────────── */
+    {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/DerivedNormalizationProps.txt", ucd_dir);
+      LighterMap map = {0};
+      if (lighter_map_open(&map, path, 1) == 0) {
+        const char* data = (const char*)map.data;
+        size_t fsize = map.size;
+        const char* p = data;
+        const char* fend = data + fsize;
+        while (p < fend) {
+          uint32_t first, last;
+          int c;
+          const char* s = nfc_skip_ws(p);
+
+          if (*s == '#' || *s == '\n' || *s == '\r') {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+
+          c = nfc_parse_hex(s, &first);
+          if (!c) {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+          s += c;
+          if (s[0] == '.' && s[1] == '.') {
+            s += 2;
+            c = nfc_parse_hex(s, &last);
+            s += c;
+          } else {
+            last = first;
+          }
+          s = nfc_skip_ws(s);
+          if (*s == ';') {
+            ++s;
+          }
+          s = nfc_skip_ws(s);
+          if (strncmp(s, "NFC_QC", 6)) {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+          s += 6;
+          s = nfc_skip_ws(s);
+          if (*s == ';') {
+            ++s;
+          }
+          s = nfc_skip_ws(s);
+
+          uint8_t qv = NFC_QC_YES;
+          if (*s == 'N') {
+            qv = NFC_QC_NO;
+          } else if (*s == 'M')
+            qv = NFC_QC_MAYBE;
+          else {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+
+          for (uint32_t cp = first; cp <= last && cp < NFC_MAX_CP; ++cp) {
+            raw_qc[cp] = qv;
+          }
+
+          nfc_skip_to_next_line(&p, fend);
+        }
+        lighter_map_close(&map);
+      }
     }
-  }
 
-  /* Build data structures */
-  nfc_build_trie(d, raw_ccc, raw_qc);
-  nfc_build_comp_table(d, raw_ccc, comp_excl);
+    /* ── CompositionExclusions.txt ────────────────────────────────── */
+    {
+      char path[4096];
+      snprintf(path, sizeof(path), "%s/CompositionExclusions.txt", ucd_dir);
+      LighterMap map = {0};
+      if (lighter_map_open(&map, path, 1) == 0) {
+        const char* data = (const char*)map.data;
+        size_t fsize = map.size;
+        const char* p = data;
+        const char* fend = data + fsize;
+        while (p < fend) {
+          uint32_t cp;
+          int c;
+          const char* s = nfc_skip_ws(p);
 
-  free(raw_ccc);
-  free(raw_qc);
-  free(comp_excl);
-  return d;
+          if (*s == '#' || *s == '\n' || *s == '\r') {
+            nfc_skip_to_next_line(&p, fend);
+            continue;
+          }
+          c = nfc_parse_hex(s, &cp);
+          if (c > 0 && cp < NFC_MAX_CP) {
+            comp_excl[cp] = 1;
+          }
+
+          nfc_skip_to_next_line(&p, fend);
+        }
+        lighter_map_close(&map);
+      }
+    }
+
+    /* Exclude singletons from composition */
+    for (uint32_t cp = 0; cp < NFC_MAX_CP; ++cp) {
+      uint32_t idx = d->decomp_idx[cp];
+      if (idx && d->decomp_data[idx] == 1) {
+        comp_excl[cp] = 1;
+      }
+    }
+
+    /* Build data structures */
+    nfc_build_trie(d, raw_ccc, raw_qc);
+    nfc_build_comp_table(d, raw_ccc, comp_excl);
+
+    free(raw_ccc);
+    free(raw_qc);
+    free(comp_excl);
+    return d;
 
   } while (0);
 

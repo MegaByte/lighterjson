@@ -13,6 +13,7 @@
 
 typedef struct Bitfield {
   size_t size;
+  uint64_t initial_bits;
   uint64_t* bits;
   size_t bit_level;
   size_t byte_level;
@@ -22,8 +23,9 @@ typedef struct Bitfield {
 typedef enum Container { None = -1, Array, Object } Container;
 
 static inline void init_bits(Bitfield* bitfield) {
-  bitfield->size = 1;  /* number of uint64_t elements */
-  bitfield->bits = (uint64_t*)malloc(bitfield->size * sizeof(uint64_t));
+  bitfield->size = 1; /* number of uint64_t elements */
+  bitfield->initial_bits = 0;
+  bitfield->bits = &bitfield->initial_bits;
   bitfield->bit_level = 0;
   bitfield->byte_level = 0;
   bitfield->current = -1;
@@ -37,7 +39,18 @@ static inline void increment_bit(Bitfield* bitfield) {
     ++(bitfield->bit_level);
   }
   if (bitfield->byte_level >= bitfield->size) {
-    bitfield->bits = (uint64_t*)realloc(bitfield->bits, ++(bitfield->size) * sizeof(uint64_t));
+    size_t new_size = bitfield->size + 1;
+    uint64_t* new_bits = (uint64_t*)malloc(new_size * sizeof(uint64_t));
+    if (bitfield->bits == &bitfield->initial_bits) {
+      new_bits[0] = bitfield->initial_bits;
+    } else {
+      for (size_t i = 0; i < bitfield->size; ++i)
+        new_bits[i] = bitfield->bits[i];
+      free(bitfield->bits);
+    }
+    new_bits[new_size - 1] = 0;
+    bitfield->bits = new_bits;
+    bitfield->size = new_size;
   }
 }
 
@@ -62,9 +75,7 @@ static inline void pop_bit(Bitfield* bitfield) {
   } else {
     --(bitfield->bit_level);
   }
-  bitfield->current = bitfield->bit_level > 0 || bitfield->byte_level > 0
-      ? (bitfield->bits[bitfield->byte_level] >> (bitfield->bit_level - 1)) & 1
-      : -1;
+  bitfield->current = bitfield->bit_level > 0 || bitfield->byte_level > 0 ? (bitfield->bits[bitfield->byte_level] >> (bitfield->bit_level - 1)) & 1 : -1;
 }
 
 #endif /* LIGHTER_BITFIELD_H */

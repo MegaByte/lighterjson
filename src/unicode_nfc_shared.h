@@ -15,9 +15,9 @@
 #include "lighter_memmap.h"
 
 #if defined(__GNUC__) || defined(__clang__)
-#define NFC_UNUSED __attribute__((unused))
+  #define NFC_UNUSED __attribute__((unused))
 #else
-#define NFC_UNUSED
+  #define NFC_UNUSED
 #endif
 
 /* Check that offset + len <= size with no overflow. */

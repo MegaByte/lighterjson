@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "unicode_nfc_shared.h"
 #include "lighter_cpu.h"
+#include "unicode_nfc_shared.h"
 
 /* UTF-8 boundaries and masks (RFC 3629). */
 #define UTF8_ASCII_MAX 0x80u
@@ -350,7 +350,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
 #if LIGHTER_PLATFORM_X86
   if (has_avx512) {
     while (p + 64 <= end) {
-      __m512i chunk = _mm512_loadu_si512((const void*) p);
+      __m512i chunk = _mm512_loadu_si512((const void*)p);
       if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
         break;
       }
@@ -358,7 +358,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
     }
   } else if (has_avx2) {
     while (p + 32 <= end) {
-      __m256i chunk = _mm256_loadu_si256((const __m256i*) p);
+      __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
       if (_mm256_movemask_epi8(chunk) != 0) {
         break;
       }
@@ -367,7 +367,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
   } else
 #endif
 #if LIGHTER_PLATFORM_ARM64
-  if (has_neon) {
+      if (has_neon) {
     while (p + 16 <= end) {
       uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
       uint32x4_t masked = vreinterpretq_u32_u8(vandq_u8(chunk, vdupq_n_u8(0x80)));
@@ -379,7 +379,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
   } else
 #endif
 #if LIGHTER_PLATFORM_RISCV
-  if (has_rvv) {
+      if (has_rvv) {
     while (p < end) {
       size_t n = end - p;
       size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);

@@ -139,206 +139,146 @@ static inline void lighter_string_do_escape(LighterData* data) {
 
 #include "lighter_cpu.h"
 
-#if LIGHTER_PLATFORM_X86
-LIGHTER_TARGET_AVX512
-static inline void lighter_simd_avx512_string_skip(LighterData* data) {
-  while (data->rindex + 64 <= data->data_end) {
-    __m512i chunk = _mm512_loadu_si512((const void*) data->rindex);
-    __m512i quote = _mm512_set1_epi8('"');
-    __m512i escape = _mm512_set1_epi8('\\');
+static inline void lighter_do_string_impl(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  uint8_t* start = data->lindex;
+  uint8_t* run = data->rindex;
+  uint8_t* end = data->data_end;
 
-    __mmask64 test_quote = _mm512_cmpeq_epi8_mask(chunk, quote);
-    __mmask64 test_escape = _mm512_cmpeq_epi8_mask(chunk, escape);
-    __mmask64 test_either = test_quote | test_escape;
-
-    if (test_either == 0) {
-      data->rindex += 64;
-    } else {
-#if defined(_MSC_VER)
-      unsigned long offset;
-#if defined(_M_X64)
-      _BitScanForward64(&offset, test_either);
-      data->rindex += offset;
-#else
-      if ((uint32_t)test_either != 0) {
-        _BitScanForward(&offset, (uint32_t)test_either);
-        data->rindex += offset;
-      } else {
-        _BitScanForward(&offset, (uint32_t)(test_either >> 32));
-        data->rindex += offset + 32;
+  while (run < end) {
+    uint8_t* p = run;
+    #if LIGHTER_PLATFORM_X86
+      if (has_avx512) {
+        __m512i quotes = _mm512_set1_epi8('"');
+        __m512i backslashes = _mm512_set1_epi8('\\');
+        while (p + 64 <= end) {
+          __m512i chunk = _mm512_loadu_si512((const void*)p);
+          __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, backslashes);
+          if (mask != 0) {
+            #if defined(_MSC_VER)
+              unsigned long offset;
+              _BitScanForward64(&offset, mask);
+              p += offset;
+            #else
+              p += __builtin_ctzll(mask);
+            #endif
+            break;
+          }
+          p += 64;
+        }
+      } else if (has_avx2) {
+        __m256i quotes = _mm256_set1_epi8('"');
+        __m256i backslashes = _mm256_set1_epi8('\\');
+        while (p + 32 <= end) {
+          __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+          __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, backslashes));
+          uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
+          if (mask != 0) {
+            #if defined(_MSC_VER)
+              unsigned long offset;
+              _BitScanForward(&offset, mask);
+              p += offset;
+            #else
+              p += __builtin_ctz(mask);
+            #endif
+            break;
+          }
+          p += 32;
+        }
       }
-#endif
-#else
-      data->rindex += __builtin_ctzll(test_either);
-#endif
-      return;
-    }
-  }
-}
+    #elif LIGHTER_PLATFORM_ARM64
+      if (has_neon) {
+        uint8x16_t quotes = vdupq_n_u8('"');
+        uint8x16_t backslashes = vdupq_n_u8('\\');
+        while (p + 16 <= end) {
+          uint8x16_t chunk = vld1q_u8(p);
+          uint8x16_t m = vorrq_u8(vceqq_u8(chunk, quotes), vceqq_u8(chunk, backslashes));
+          uint64x2_t u64 = vreinterpretq_u64_u8(m);
+          uint64_t low = vgetq_lane_u64(u64, 0);
+          uint64_t high = vgetq_lane_u64(u64, 1);
+          if (low != 0) {
+            #if defined(_MSC_VER)
+              unsigned long offset;
+              _BitScanForward64(&offset, low);
+              p += (offset >> 3);
+            #else
+              p += (__builtin_ctzll(low) >> 3);
+            #endif
+            break;
+          } else if (high != 0) {
+            #if defined(_MSC_VER)
+              unsigned long offset;
+              _BitScanForward64(&offset, high);
+              p += (offset >> 3) + 8;
+            #else
+              p += (__builtin_ctzll(high) >> 3) + 8;
+            #endif
+            break;
+          }
+          p += 16;
+        }
+      }
+    #elif LIGHTER_PLATFORM_RISCV
+      if (has_rvv) {
+        while (p < end) {
+          size_t n = end - p;
+          size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+          vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+          vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl);
+          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\\', vl), vl);
+          intptr_t index = __riscv_vfirst_m_b8(m, vl);
+          if (index >= 0) {
+            p += index;
+            break;
+          }
+          p += vl;
+        }
+      }
+    #endif
+    run = p;
+    if (run >= end) break;
 
-LIGHTER_TARGET_AVX2
-static inline void lighter_simd_avx2_string_skip(LighterData* data) {
-  while (data->rindex + 32 <= data->data_end) {
-    __m256i chunk = _mm256_loadu_si256((const __m256i*) data->rindex);
-    __m256i quote = _mm256_set1_epi8('"');
-    __m256i escape = _mm256_set1_epi8('\\');
-    
-    __m256i test_quote = _mm256_cmpeq_epi8(chunk, quote);
-    __m256i test_escape = _mm256_cmpeq_epi8(chunk, escape);
-    __m256i test_either = _mm256_or_si256(test_quote, test_escape);
-    
-    uint32_t mask = (uint32_t)_mm256_movemask_epi8(test_either);
-    
-    if (mask == 0) {
-      data->rindex += 32;
-    } else {
-#if defined(_MSC_VER)
-      unsigned long offset;
-      _BitScanForward(&offset, mask);
-      data->rindex += offset;
-#else
-      data->rindex += __builtin_ctz(mask);
-#endif
-      return;
-    }
-  }
-}
-#endif /* LIGHTER_PLATFORM_X86 */
-#if LIGHTER_PLATFORM_ARM64
-static inline void lighter_simd_neon_string_skip(LighterData* data) {
-  while (data->rindex + 16 <= data->data_end) {
-    uint8x16_t chunk = vld1q_u8((const uint8_t*)data->rindex);
-    uint8x16_t quote = vdupq_n_u8('"');
-    uint8x16_t escape = vdupq_n_u8('\\');
-    
-    uint8x16_t test_quote = vceqq_u8(chunk, quote);
-    uint8x16_t test_escape = vceqq_u8(chunk, escape);
-    uint8x16_t test_either = vorrq_u8(test_quote, test_escape);
-    
-    uint64x2_t u64 = vreinterpretq_u64_u8(test_either);
-    uint64_t low = vgetq_lane_u64(u64, 0);
-    uint64_t high = vgetq_lane_u64(u64, 1);
-    
-    if (low != 0) {
-#if defined(_MSC_VER)
-      unsigned long offset;
-      _BitScanForward64(&offset, low);
-      data->rindex += (offset >> 3);
-#else
-      data->rindex += __builtin_ctzll(low) >> 3;
-#endif
-      return;
-    } else if (high != 0) {
-#if defined(_MSC_VER)
-      unsigned long offset;
-      _BitScanForward64(&offset, high);
-      data->rindex += (offset >> 3) + 8;
-#else
-      data->rindex += (__builtin_ctzll(high) >> 3) + 8;
-#endif
-      return;
-    }
-    data->rindex += 16;
-  }
-}
-#endif
-
-#if LIGHTER_PLATFORM_RISCV
-static inline void lighter_simd_rvv_string_skip(LighterData* data) {
-  while (data->rindex < data->data_end) {
-    size_t n = data->data_end - data->rindex;
-    size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-    vuint8m1_t chunk = __riscv_vle8_v_u8m1(data->rindex, vl);
-    vbool8_t m_quote = __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl);
-    vbool8_t m_escape = __riscv_vmseq_vx_u8m1_b8(chunk, '\\', vl);
-    vbool8_t mask = __riscv_vmor_mm_b8(m_quote, m_escape, vl);
-    intptr_t index = __riscv_vfirst_m_b8(mask, vl);
-    if (index >= 0) {
-      data->rindex += index;
-      return;
-    }
-    data->rindex += vl;
-  }
-}
-#endif
-
-#define LIGHTER_STRING_TAIL() \
-    if (data->rindex >= data->data_end) break; \
-    switch (*data->rindex) { \
-      case '\\': \
-        lighter_string_do_escape(data); \
-        break; \
-      case '"': { \
-        if (!disable_nfc && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_avx512, has_avx2, has_neon, has_rvv) != NFC_QC_YES) { \
-          ptrdiff_t pending = data->rindex - data->lindex; \
-          lighter_write_data(data, 0); \
-          uint8_t* str_content_start = data->windex - pending + 1; \
-          uint8_t* str_content_end = data->windex - 1; \
-          uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end); \
-          memmove(new_end, data->windex - 1, 1); \
-          data->windex = new_end + 1; \
-        } else { \
-          ++(data->rindex); \
-        } \
-        return; \
-      } \
-      default: \
-        ++(data->rindex); \
-    }
-
-/** Parse and optionally NFC-normalize a JSON string. NFC data is loaded on first use
- *  when a string ends. Uses lighter_write_data to flush segments. */
-static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  ++(data->rindex);
-
-#if LIGHTER_PLATFORM_X86
-  if (has_avx512) {
-    while (data->rindex < data->data_end) {
-      lighter_simd_avx512_string_skip(data);
-      LIGHTER_STRING_TAIL()
-    }
-    return;
-  }
-  if (has_avx2) {
-    while (data->rindex < data->data_end) {
-      lighter_simd_avx2_string_skip(data);
-      LIGHTER_STRING_TAIL()
-    }
-    return;
-  }
-#endif
-
-#if LIGHTER_PLATFORM_ARM64
-  if (has_neon) {
-    while (data->rindex < data->data_end) {
-      lighter_simd_neon_string_skip(data);
-      LIGHTER_STRING_TAIL()
-    }
-    return;
-  }
-#endif
-
-#if LIGHTER_PLATFORM_RISCV
-  if (has_rvv) {
-    while (data->rindex < data->data_end) {
-      lighter_simd_rvv_string_skip(data);
-      LIGHTER_STRING_TAIL()
-    }
-    return;
-  }
-#endif
-
-  while (data->rindex < data->data_end) {
-    while (data->rindex + 8 <= data->data_end) {
-      uint64_t v;
-      memcpy(&v, data->rindex, 8);
-      if (lighter_has_byte(v, '"') || lighter_has_byte(v, '\\')) {
+    switch (*run) {
+      case '\\':
+        data->rindex = run;
+        lighter_string_do_escape(data);
+        run = data->rindex;
         break;
+      case '"': {
+        if (!disable_nfc && nfc_quick_check("lighter.nfc", start + 1, run, has_avx512, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
+          data->rindex = run;
+          lighter_write_data(data, 0);
+          uint8_t* content_start = data->windex - (run - start) + 1;
+          uint8_t* content_end = data->windex - 1;
+          uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), content_start, content_end);
+          memmove(new_end, data->windex - 1, 1);
+          data->windex = new_end + 1;
+          run = data->rindex;
+        } else {
+          ++run;
+        }
+        data->rindex = run;
+        return;
       }
-      data->rindex += 8;
+      default:
+        ++run;
     }
-    LIGHTER_STRING_TAIL()
+    data->rindex = run;
   }
+}
+
+static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  uint8_t* start = data->rindex;
+  ++(data->rindex);
+  if (has_avx512)
+    lighter_do_string_impl(data, disable_nfc, 1, 0, 0, 0);
+  else if (has_avx2)
+    lighter_do_string_impl(data, disable_nfc, 0, 1, 0, 0);
+  else if (has_neon)
+    lighter_do_string_impl(data, disable_nfc, 0, 0, 1, 0);
+  else if (has_rvv)
+    lighter_do_string_impl(data, disable_nfc, 0, 0, 0, 1);
+  else
+    lighter_do_string_impl(data, disable_nfc, 0, 0, 0, 0);
 }
 
 #endif /* LIGHTER_STRING_H */

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "unicode_nfc_shared.h"
+#include "lighter_cpu.h"
 
 /* UTF-8 boundaries and masks (RFC 3629). */
 #define UTF8_ASCII_MAX 0x80u
@@ -343,17 +344,64 @@ static inline NfcData* nfc_get_or_load(const char* path);
    NFC_QC_NO or NFC_QC_MAYBE otherwise.
    Fast path: if every byte < NFC_QC_FAST_PATH_BYTE, segment is NFC-safe (no load).
    Loads NFC data from path only when the slow path is needed. */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end) {
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   const uint8_t* p = start;
 
-  /* Fast-path: strictly 7-bit ASCII */
-  while (p + 8 <= end) {
-    uint64_t v;
-    memcpy(&v, p, 8);
-    if (v & 0x8080808080808080ULL) {
-      break;
+#if LIGHTER_PLATFORM_X86
+  if (has_avx512) {
+    while (p + 64 <= end) {
+      __m512i chunk = _mm512_loadu_si512((const void*) p);
+      if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
+        break;
+      }
+      p += 64;
     }
-    p += 8;
+  } else if (has_avx2) {
+    while (p + 32 <= end) {
+      __m256i chunk = _mm256_loadu_si256((const __m256i*) p);
+      if (_mm256_movemask_epi8(chunk) != 0) {
+        break;
+      }
+      p += 32;
+    }
+  } else
+#endif
+#if LIGHTER_PLATFORM_ARM64
+  if (has_neon) {
+    while (p + 16 <= end) {
+      uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
+      uint32x4_t masked = vreinterpretq_u32_u8(vandq_u8(chunk, vdupq_n_u8(0x80)));
+      if (vmaxvq_u32(masked) != 0) {
+        break;
+      }
+      p += 16;
+    }
+  } else
+#endif
+#if LIGHTER_PLATFORM_RISCV
+  if (has_rvv) {
+    while (p < end) {
+      size_t n = end - p;
+      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+      vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+      vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
+      if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
+        break;
+      }
+      p += vl;
+    }
+  } else
+#endif
+  {
+    /* Fast-path: strictly 7-bit ASCII */
+    while (p + 8 <= end) {
+      uint64_t v;
+      memcpy(&v, p, 8);
+      if (v & 0x8080808080808080ULL) {
+        break;
+      }
+      p += 8;
+    }
   }
   int pure_ascii = 1;
   for (const uint8_t* check = p; check < end; ++check) {

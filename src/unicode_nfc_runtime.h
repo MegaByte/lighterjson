@@ -410,8 +410,9 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       break;
     }
   }
-  if (pure_ascii)
+  if (pure_ascii) {
     return NFC_QC_YES;
+  }
 
   {
     const NfcData* d = nfc_get_or_load(path);
@@ -621,6 +622,40 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   uint32_t decomp_sparse_count, decomp_data_len, decomp_data_packed_size, comp_size;
   uint32_t s1_num_chunks, s1_num_pairs;
   uint32_t s2_ccc_val_packed, s2_ccc_chk_packed, s2_qc_val_packed, s2_qc_chk_packed;
+  size_t off, len, sz;
+  size_t top_size;
+  unsigned chunk_bits;
+  size_t stage1_chunks_byte_size;
+  const uint8_t* decomp_data_src;
+  size_t decomp_remaining;
+  uint8_t* decomp_buf;
+  const uint8_t* comp_src;
+  uint32_t cp_idx;
+  uint32_t block_idx;
+  uint8_t chunk_idx;
+  uint8_t pair_id;
+  uint32_t ccc_blk, qc_blk;
+  uint32_t ccc_off, qc_off;
+  size_t bytes_per_chunk;
+  const uint8_t* src;
+  unsigned mask;
+  uint32_t c;
+  int i;
+  size_t in;
+  unsigned bit;
+  unsigned byte_off;
+  unsigned bit_off;
+  unsigned val;
+  uint32_t rec_len;
+  size_t rec_bytes;
+  size_t off_rec;
+  uint64_t v_comp;
+  uint32_t st_comp, cb_comp, co_comp;
+  size_t hash_idx;
+  size_t i_loop;
+  uint32_t cp_val, idx_val;
+  size_t hash_cap;
+  size_t out_idx;
 
   memcpy(&off_s1_top, h + 8, 4);
   memcpy(&off_s1_chunks, h + 12, 4);
@@ -659,8 +694,10 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     goto bin_fail;
   }
   /* RLE packed sizes: must be plausible (RLE can expand but not arbitrarily) */
-  if (s2_ccc_val_packed > 2u * s2_ccc_size || s2_ccc_chk_packed > 2u * s2_ccc_size || s2_qc_val_packed > 2u * s2_qc_size || s2_qc_chk_packed > 2u * s2_qc_size)
+  if (s2_ccc_val_packed > 2u * s2_ccc_size || s2_ccc_chk_packed > 2u * s2_ccc_size || s2_qc_val_packed > 2u * s2_qc_size ||
+      s2_qc_chk_packed > 2u * s2_qc_size) {
     goto bin_fail;
+  }
 
   d->stage2_blocks_ccc = (uint16_t)s2_blocks_ccc;
   d->stage2_blocks_qc = (uint16_t)s2_blocks_qc;
@@ -669,9 +706,9 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   d->comp_size = comp_size;
   d->stage1_num_chunks = (uint16_t)s1_num_chunks;
   d->stage1_num_pairs = (uint8_t)s1_num_pairs;
-
-  size_t off, len, sz = size;
-  size_t top_size = (NFC_BLOCK_COUNT + NFC_STAGE1_CHUNK_ENTRIES - 1u) / NFC_STAGE1_CHUNK_ENTRIES;
+  sz = size;
+  top_size = (NFC_BLOCK_COUNT + NFC_STAGE1_CHUNK_ENTRIES - 1u) / NFC_STAGE1_CHUNK_ENTRIES;
+  chunk_bits = 1;
 
   off = off_s1_top;
   len = top_size;
@@ -679,14 +716,13 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     goto bin_fail;
   }
 
-  unsigned chunk_bits = 1;
   if (s1_num_pairs > 1) {
     unsigned n = (unsigned)s1_num_pairs;
     while ((1u << chunk_bits) < n && chunk_bits < NFC_STAGE1_MAX_CHUNK_BITS) {
       chunk_bits++;
     }
   }
-  size_t stage1_chunks_byte_size = (size_t)s1_num_chunks * ((NFC_STAGE1_CHUNK_ENTRIES * chunk_bits + 7u) / 8u);
+  stage1_chunks_byte_size = (size_t)s1_num_chunks * ((NFC_STAGE1_CHUNK_ENTRIES * chunk_bits + 7u) / 8u);
   off = off_s1_chunks;
   len = stage1_chunks_byte_size;
   if (!nfc_bounds_ok(off, len, sz)) {
@@ -779,25 +815,24 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     goto bin_fail;
   }
 
-  {
-    size_t bytes_per_chunk = (NFC_STAGE1_CHUNK_ENTRIES * chunk_bits + 7u) / 8u;
-    const uint8_t* src = (const uint8_t*)(data + off_s1_chunks);
-    d->stage1_chunks = (uint8_t*)malloc((size_t)s1_num_chunks * NFC_STAGE1_CHUNK_ENTRIES);
-    if (!d->stage1_chunks) {
-      goto bin_fail;
-    }
-    unsigned mask = (1u << chunk_bits) - 1u;
-    for (uint32_t c = 0; c < s1_num_chunks; ++c) {
-      size_t in = c * bytes_per_chunk;
-      for (int i = 0; i < NFC_STAGE1_CHUNK_ENTRIES; ++i) {
-        unsigned bit = (unsigned)i * chunk_bits;
-        unsigned byte_off = bit / 8;
-        unsigned bit_off = bit % 8;
-        unsigned val = (unsigned)src[in + byte_off] >> bit_off;
-        if (bit_off + chunk_bits > 8 && byte_off + 1 < bytes_per_chunk)
-          val |= (unsigned)(src[in + byte_off + 1] & ((1u << (bit_off + chunk_bits - 8)) - 1u)) << (8 - bit_off);
-        d->stage1_chunks[c * NFC_STAGE1_CHUNK_ENTRIES + i] = (uint8_t)(val & mask);
+  bytes_per_chunk = (NFC_STAGE1_CHUNK_ENTRIES * chunk_bits + 7u) / 8u;
+  src = (const uint8_t*)(data + off_s1_chunks);
+  d->stage1_chunks = (uint8_t*)malloc((size_t)s1_num_chunks * NFC_STAGE1_CHUNK_ENTRIES);
+  if (!d->stage1_chunks) {
+    goto bin_fail;
+  }
+  mask = (1u << chunk_bits) - 1u;
+  for (c = 0; c < s1_num_chunks; ++c) {
+    in = c * bytes_per_chunk;
+    for (i = 0; i < NFC_STAGE1_CHUNK_ENTRIES; ++i) {
+      bit = (unsigned)i * chunk_bits;
+      byte_off = bit / 8;
+      bit_off = bit % 8;
+      val = (unsigned)src[in + byte_off] >> bit_off;
+      if (bit_off + chunk_bits > 8 && byte_off + 1 < bytes_per_chunk) {
+        val |= (unsigned)(src[in + byte_off + 1] & ((1u << (bit_off + chunk_bits - 8)) - 1u)) << (8 - bit_off);
       }
+      d->stage1_chunks[c * NFC_STAGE1_CHUNK_ENTRIES + i] = (uint8_t)(val & mask);
     }
   }
 
@@ -807,25 +842,26 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     goto bin_fail;
   }
   d->decomp_data[0] = 0;
-  const uint8_t* decomp_data_src = (const uint8_t*)(data + off_decomp_data);
-  size_t out_idx = 1;
-  size_t decomp_remaining = (size_t)decomp_data_packed_size;
+  decomp_data_src = (const uint8_t*)(data + off_decomp_data);
+  out_idx = 1;
+  decomp_remaining = (size_t)decomp_data_packed_size;
   while (decomp_remaining > 0 && out_idx < (size_t)decomp_data_len) {
     if (decomp_remaining < NFC_DECOMP_RECORD_LEN_BYTES) {
       goto bin_fail;
     }
-    uint32_t rec_len = (uint32_t)decomp_data_src[0];
+    rec_len = (uint32_t)decomp_data_src[0];
     if (rec_len == 0 || rec_len > NFC_DECOMP_MAX) {
       goto bin_fail;
     }
-    size_t rec_bytes = NFC_DECOMP_RECORD_LEN_BYTES + NFC_DECOMP_CP_BYTES * (size_t)rec_len;
+    rec_bytes = NFC_DECOMP_RECORD_LEN_BYTES + NFC_DECOMP_CP_BYTES * (size_t)rec_len;
     if (decomp_remaining < rec_bytes) {
       goto bin_fail;
     }
     d->decomp_data[out_idx++] = rec_len;
-    for (uint32_t j = 0; j < rec_len; ++j) {
-      size_t off = NFC_DECOMP_RECORD_LEN_BYTES + (size_t)j * NFC_DECOMP_CP_BYTES;
-      d->decomp_data[out_idx++] = (uint32_t)decomp_data_src[off] | ((uint32_t)decomp_data_src[off + 1] << 8) | ((uint32_t)decomp_data_src[off + 2] << 16);
+    for (i = 0; i < (int)rec_len; ++i) {
+      off_rec = NFC_DECOMP_RECORD_LEN_BYTES + (size_t)i * NFC_DECOMP_CP_BYTES;
+      d->decomp_data[out_idx++] =
+          (uint32_t)decomp_data_src[off_rec] | ((uint32_t)decomp_data_src[off_rec + 1] << 8) | ((uint32_t)decomp_data_src[off_rec + 2] << 16);
     }
     decomp_data_src += rec_bytes;
     decomp_remaining -= rec_bytes;
@@ -835,7 +871,7 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   }
 
   /* Keep decomp sparse as NFC_DECOMP_SPARSE_ENTRY_BYTES per entry in memory (no unpack) */
-  uint8_t* decomp_buf = (uint8_t*)malloc((size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
+  decomp_buf = (uint8_t*)malloc((size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
   if (!decomp_buf && decomp_sparse_count > 0) {
     goto bin_fail;
   }
@@ -847,13 +883,13 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   if (!d->comp_table) {
     goto bin_fail;
   }
-  const uint8_t* comp_src = (const uint8_t*)(data + off_comp);
-  for (uint32_t i = 0; i < comp_size; ++i) {
-    uint64_t v = (uint64_t)comp_src[0] | ((uint64_t)comp_src[1] << 8) | ((uint64_t)comp_src[2] << 16) | ((uint64_t)comp_src[3] << 24) |
-                 ((uint64_t)comp_src[4] << 32) | ((uint64_t)comp_src[5] << 40) | ((uint64_t)comp_src[6] << 48) | ((uint64_t)comp_src[7] << 56);
-    d->comp_table[i].starter = (uint32_t)(v & NFC_COMP_CP_MASK);
-    d->comp_table[i].combining = (uint32_t)((v >> NFC_COMP_CP_BITS) & NFC_COMP_CP_MASK);
-    d->comp_table[i].composed = (uint32_t)((v >> (2 * NFC_COMP_CP_BITS)) & NFC_COMP_CP_MASK);
+  comp_src = (const uint8_t*)(data + off_comp);
+  for (i_loop = 0; i_loop < (size_t)comp_size; ++i_loop) {
+    v_comp = (uint64_t)comp_src[0] | ((uint64_t)comp_src[1] << 8) | ((uint64_t)comp_src[2] << 16) | ((uint64_t)comp_src[3] << 24) |
+             ((uint64_t)comp_src[4] << 32) | ((uint64_t)comp_src[5] << 40) | ((uint64_t)comp_src[6] << 48) | ((uint64_t)comp_src[7] << 56);
+    d->comp_table[i].starter = (uint32_t)(v_comp & NFC_COMP_CP_MASK);
+    d->comp_table[i].combining = (uint32_t)((v_comp >> NFC_COMP_CP_BITS) & NFC_COMP_CP_MASK);
+    d->comp_table[i].composed = (uint32_t)((v_comp >> (2 * NFC_COMP_CP_BITS)) & NFC_COMP_CP_MASK);
     comp_src += NFC_COMP_ENTRY_BYTES;
   }
 
@@ -864,24 +900,24 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   if (!d->ccc_dense || !d->qc_dense || !d->decomp_idx) {
     goto bin_fail;
   }
-  for (uint32_t cp = 0; cp < NFC_MAX_CP; cp++) {
-    uint32_t block_idx = cp >> NFC_BLOCK_SHIFT;
-    uint8_t chunk_idx = d->stage1_top[block_idx >> NFC_STAGE1_CHUNK_BITS];
-    uint8_t pair_id = d->stage1_chunks[((size_t)chunk_idx << NFC_STAGE1_CHUNK_BITS) + (block_idx & (NFC_STAGE1_CHUNK_ENTRIES - 1))];
-    uint8_t ccc_blk = d->pair_map_ccc[pair_id];
-    uint32_t ccc_off = d->stage2_ccc_off[ccc_blk] + (cp & NFC_BLOCK_MASK);
-    d->ccc_dense[cp] = (d->stage2_ccc_chk[ccc_off] == ccc_blk) ? d->stage2_ccc_val[ccc_off] : 0;
-    uint8_t qc_blk = d->pair_map_qc[pair_id];
-    uint32_t qc_off = d->stage2_qc_off[qc_blk] + (cp & NFC_BLOCK_MASK);
-    d->qc_dense[cp] = (d->stage2_qc_chk[qc_off] == qc_blk) ? d->stage2_qc_val[qc_off] : NFC_QC_YES;
+  for (cp_idx = 0; cp_idx < NFC_MAX_CP; cp_idx++) {
+    block_idx = cp_idx >> NFC_BLOCK_SHIFT;
+    chunk_idx = d->stage1_top[block_idx >> NFC_STAGE1_CHUNK_BITS];
+    pair_id = d->stage1_chunks[((size_t)chunk_idx << NFC_STAGE1_CHUNK_BITS) + (block_idx & (NFC_STAGE1_CHUNK_ENTRIES - 1))];
+    ccc_blk = d->pair_map_ccc[pair_id];
+    ccc_off = d->stage2_ccc_off[ccc_blk] + (cp_idx & NFC_BLOCK_MASK);
+    d->ccc_dense[cp_idx] = (d->stage2_ccc_chk[ccc_off] == ccc_blk) ? d->stage2_ccc_val[ccc_off] : 0;
+    qc_blk = d->pair_map_qc[pair_id];
+    qc_off = d->stage2_qc_off[qc_blk] + (cp_idx & NFC_BLOCK_MASK);
+    d->qc_dense[cp_idx] = (d->stage2_qc_chk[qc_off] == qc_blk) ? d->stage2_qc_val[qc_off] : NFC_QC_YES;
   }
-  for (size_t i = 0; i < decomp_sparse_count; i++) {
-    uint32_t cp = nfc_decomp_sparse_cp(d, i);
-    uint32_t idx = nfc_decomp_sparse_idx(d, i);
-    d->decomp_idx[cp] = idx;
+  for (i_loop = 0; i_loop < (size_t)decomp_sparse_count; i_loop++) {
+    cp_val = nfc_decomp_sparse_cp(d, i_loop);
+    idx_val = nfc_decomp_sparse_idx(d, i_loop);
+    d->decomp_idx[cp_val] = idx_val;
   }
   /* Size hash: next power of 2 >= 2*comp_size, between NFC_COMP_HASH_MIN and NFC_COMP_HASH_MAX */
-  size_t hash_cap = NFC_COMP_HASH_MIN;
+  hash_cap = NFC_COMP_HASH_MIN;
   while (hash_cap < (size_t)comp_size * 2u && hash_cap < NFC_COMP_HASH_MAX) {
     hash_cap *= 2;
   }
@@ -890,15 +926,17 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     goto bin_fail;
   }
   d->comp_hash_cap = hash_cap;
-  for (uint32_t i = 0; i < comp_size; i++) {
-    uint32_t st = d->comp_table[i].starter, cb = d->comp_table[i].combining, co = d->comp_table[i].composed;
-    size_t j = ((size_t)st * 31u + (size_t)cb) % hash_cap;
-    while (d->comp_hash[j].composed != 0 || d->comp_hash[j].starter != 0 || d->comp_hash[j].combining != 0) {
-      j = (j + 1u) % hash_cap;
+  for (i_loop = 0; i_loop < (size_t)comp_size; i_loop++) {
+    st_comp = d->comp_table[i_loop].starter;
+    cb_comp = d->comp_table[i_loop].combining;
+    co_comp = d->comp_table[i_loop].composed;
+    hash_idx = ((size_t)st_comp * 31u + (size_t)cb_comp) % hash_cap;
+    while (d->comp_hash[hash_idx].composed != 0 || d->comp_hash[hash_idx].starter != 0 || d->comp_hash[hash_idx].combining != 0) {
+      hash_idx = (hash_idx + 1u) % hash_cap;
     }
-    d->comp_hash[j].starter = st;
-    d->comp_hash[j].combining = cb;
-    d->comp_hash[j].composed = co;
+    d->comp_hash[hash_idx].starter = st_comp;
+    d->comp_hash[hash_idx].combining = cb_comp;
+    d->comp_hash[hash_idx].composed = co_comp;
   }
   free(d->comp_table);
   d->comp_table = NULL;

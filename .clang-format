@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+PointerAlignment: Left
+IndentCaseLabels: true
+ColumnLimit: 160
+AllowShortFunctionsOnASingleLine: None
+AllowShortLoopsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: Never
+IndentPPDirectives: BeforeHash
+InsertBraces: true

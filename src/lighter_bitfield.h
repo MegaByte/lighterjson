@@ -44,8 +44,9 @@ static inline void increment_bit(Bitfield* bitfield) {
     if (bitfield->bits == &bitfield->initial_bits) {
       new_bits[0] = bitfield->initial_bits;
     } else {
-      for (size_t i = 0; i < bitfield->size; ++i)
+      for (size_t i = 0; i < bitfield->size; ++i) {
         new_bits[i] = bitfield->bits[i];
+      }
       free(bitfield->bits);
     }
     new_bits[new_size - 1] = 0;

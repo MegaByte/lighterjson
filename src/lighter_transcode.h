@@ -22,28 +22,34 @@ typedef enum {
 
 static inline LighterEncoding lighter_detect_encoding(const uint8_t* data, size_t size) {
   if (size >= 4) {
-    if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF)
+    if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF) {
       return LIGHTER_ENC_UTF32BE;
-    if (data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00)
+    }
+    if (data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00) {
       return LIGHTER_ENC_UTF32LE;
+    }
   }
   if (size >= 3) {
-    if (data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF)
+    if (data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
       return LIGHTER_ENC_UTF8_BOM;
+    }
   }
   if (size >= 2) {
-    if (data[0] == 0xFE && data[1] == 0xFF)
+    if (data[0] == 0xFE && data[1] == 0xFF) {
       return LIGHTER_ENC_UTF16BE;
-    if (data[0] == 0xFF && data[1] == 0xFE)
+    }
+    if (data[0] == 0xFF && data[1] == 0xFE) {
       return LIGHTER_ENC_UTF16LE;
+    }
   }
   return LIGHTER_ENC_UTF8;
 }
 
 static inline int lighter_encode_utf8_single(uint32_t cp, uint8_t* out) {
   if (cp <= 0x7F) {
-    if (out)
+    if (out) {
       out[0] = (uint8_t)cp;
+    }
     return 1;
   } else if (cp <= 0x7FF) {
     if (out) {
@@ -77,8 +83,9 @@ static inline int lighter_encode_utf8_single(uint32_t cp, uint8_t* out) {
 }
 
 static inline int lighter_decode_utf8_single(const uint8_t* src, size_t size, size_t* r, uint32_t* cp) {
-  if (*r >= size)
+  if (*r >= size) {
     return -1;
+  }
   uint8_t c = src[(*r)++];
   if (c <= 0x7F) {
     *cp = c;
@@ -97,8 +104,9 @@ static inline int lighter_decode_utf8_single(const uint8_t* src, size_t size, si
 }
 
 static inline void lighter_encode_utf16_single(uint32_t cp, LighterEncoding enc, uint8_t* dst, size_t* w) {
-  if (cp > 0x10FFFF)
+  if (cp > 0x10FFFF) {
     cp = 0xFFFD;
+  }
   if (cp <= 0xFFFF) {
     uint16_t u = (uint16_t)cp;
     if (enc == LIGHTER_ENC_UTF16LE) {
@@ -132,8 +140,9 @@ static inline void lighter_encode_utf16_single(uint32_t cp, LighterEncoding enc,
  */
 static inline int lighter_transcode_to_utf8(const uint8_t* src, size_t size, uint8_t* dst, LighterEncoding enc, size_t* out_size) {
   if (enc == LIGHTER_ENC_UTF8) {
-    if (src != dst)
+    if (src != dst) {
       memmove(dst, src, size);
+    }
     *out_size = size;
     return 0;
   }
@@ -211,8 +220,9 @@ static inline int lighter_transcode_from_utf8(const uint8_t* src, size_t src_siz
 
   while (r < src_size) {
     uint32_t cp;
-    if (lighter_decode_utf8_single(src, src_size, &r, &cp) < 0)
+    if (lighter_decode_utf8_single(src, src_size, &r, &cp) < 0) {
       break;
+    }
     if (target_enc == LIGHTER_ENC_UTF16LE || target_enc == LIGHTER_ENC_UTF16BE) {
       lighter_encode_utf16_single(cp, target_enc, dst, &w);
     } else if (target_enc == LIGHTER_ENC_UTF32LE || target_enc == LIGHTER_ENC_UTF32BE) {

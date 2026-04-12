@@ -28,9 +28,7 @@ If passed a directory, all .json files contained within will be processed recurs
 
 Numbers can be rounded to specific decimal places using the -p switch. Use negative numbers to represent places greater than ones.
 
-JSON technically supports numbers of unlimited size, but due to implementation complexity, the supported exponent range is [-9223372036854775807, 9223372036854775807].
-
-Files must be UTF-8. Not all cases of ill-formed files are currently handled. Make sure to backup before running.
+Not all cases of ill-formed files are currently handled. Make sure to backup before running.
 
 ## Author
 Aaron Kaluszka <<megabyte@kontek.net>>

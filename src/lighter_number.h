@@ -9,9 +9,109 @@
 #include <stdint.h>
 
 #include "lighter_common.h"
+#include "lighter_simd.h"
 
-/** Parse and optionally reformat a JSON number. precision: LIGHTER_PRECISION_UNLIMITED = preserve form. */
-static inline void lighter_do_number(LighterData* data, int64_t precision) {
+/** Write an exponent string adjusted by a small delta. Performs string-based addition/subtraction. */
+static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* start, uint64_t len, int negative, int64_t delta) {
+  uint8_t buffer[128]; /* Sufficient for any reasonable JSON exponent string + delta */
+  uint8_t* p = buffer + 64;
+  uint8_t* end = p;
+  int64_t i;
+  int carry = 0;
+
+  if (negative) {
+    delta = -delta;
+  }
+
+  if (len == 0) {
+    if (delta == 0) {
+      *data->windex++ = '0';
+      return;
+    }
+    if (delta < 0) {
+      negative = !negative;
+      delta = -delta;
+    }
+    while (delta) {
+      *(--p) = (delta % 10) + '0';
+      delta /= 10;
+    }
+  } else if (len < 18) {
+    int64_t val = 0;
+    for (i = 0; (uint64_t)i < len; ++i) {
+      val = val * 10 + (start[i] - '0');
+    }
+    if (negative) {
+      val = -val;
+    }
+    val += delta;
+    if (val < 0) {
+      negative = 1;
+      val = -val;
+    } else {
+      negative = 0;
+    }
+    if (val == 0) {
+      *data->windex++ = '0';
+      return;
+    }
+    while (val) {
+      *(--p) = (val % 10) + '0';
+      val /= 10;
+    }
+  } else {
+    /* Huge string math */
+    if (delta < 0) { /* simplified subtraction since delta is small */
+      int64_t d = -delta;
+      for (i = len - 1; i >= 0; --i) {
+        int v = (start[i] - '0') - carry - (d % 10);
+        d /= 10;
+        if (v < 0) {
+          v += 10;
+          carry = 1;
+        } else {
+          carry = 0;
+        }
+        *(--p) = v + '0';
+      }
+      /* stripping leading zeros if any */
+      while (p < end - 1 && *p == '0') {
+        p++;
+      }
+    } else {
+      for (i = len - 1; i >= 0; --i) {
+        int v = (start[i] - '0') + carry + (delta % 10);
+        delta /= 10;
+        if (v >= 10) {
+          v -= 10;
+          carry = 1;
+        } else {
+          carry = 0;
+        }
+        *(--p) = v + '0';
+      }
+      while (delta || carry) {
+        int v = (delta % 10) + carry;
+        delta /= 10;
+        if (v >= 10) {
+          v -= 10;
+          carry = 1;
+        } else {
+          carry = 0;
+        }
+        *(--p) = v + '0';
+      }
+    }
+  }
+  if (negative) {
+    *data->windex++ = '-';
+  }
+  while (p < end) {
+    *data->windex++ = *p++;
+  }
+}
+
+static inline void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   uint8_t* decimal = 0;
   uint8_t* exponent = 0;
   uint8_t* non_zero_start = 0;
@@ -28,13 +128,149 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
   int negative = 0;
   int negative_exponent = 0;
   uint64_t zeroes = 0;
+  int exponent_saturated = 0;
   uint8_t* i;
-  uint64_t multiplier = 1;
-  if (*data->rindex == '-') {
+  uint8_t* p_scan = data->rindex;
+
+  if (*p_scan == '-') {
     negative = 1;
-    ++(data->rindex);
+    ++p_scan;
   }
-  for (i = data->rindex; i < data->data_end && !exponent && !number_end; ++i) {
+  data->rindex = p_scan; /* update for later use in loops if needed */
+
+  /* Loop 1: Find decimal, exponent marker, and significant digit bounds */
+  for (i = p_scan; i < data->data_end && !exponent && !number_end;) {
+    /* SIMD acceleration for long significands */
+#if LIGHTER_PLATFORM_X86
+    if (has_avx2 && i + 32 <= data->data_end) {
+      __m256i chunk = _mm256_loadu_si256((const __m256i*)i);
+      __m256i m_digit = lighter_simd_is_digit_avx2(chunk);
+      __m256i m_dot = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('.'));
+      __m256i m_exp = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('e')), _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('E')));
+      uint32_t mask_delimit = lighter_simd_mask_avx2(_mm256_or_si256(m_dot, m_exp));
+      uint32_t mask_invalid = ~lighter_simd_mask_avx2(m_digit) & 0xFFFFFFFF;
+
+      if (mask_delimit || mask_invalid) {
+        /* Finding first action point */
+        uint32_t first_action;
+        if (mask_delimit && mask_invalid) {
+          uint32_t d = lighter_simd_first_set_avx2(mask_delimit);
+          uint32_t v = lighter_simd_first_set_avx2(mask_invalid);
+          first_action = (d < v) ? d : v;
+        } else {
+          first_action = lighter_simd_first_set_avx2(mask_delimit ? mask_delimit : mask_invalid);
+        }
+
+        /* Process up to first_action for non-zero bounds */
+        __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
+        uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
+        if (mask_nonzero) {
+          uint32_t bits = mask_nonzero & (uint32_t)((1ULL << first_action) - 1);
+          if (bits) {
+            if (!non_zero_start) {
+              non_zero_start = i + lighter_simd_first_set_avx2(bits);
+            }
+            non_zero_finish = i + 31 - (uint32_t)__builtin_clz(bits);
+          }
+        }
+        i += first_action;
+        /* Exit SIMD and let scalar handle the special character */
+      } else {
+        /* Fast skip: All are digits, update bounds */
+        __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
+        uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
+        if (mask_nonzero) {
+          if (!non_zero_start) {
+            non_zero_start = i + lighter_simd_first_set_avx2(mask_nonzero);
+          }
+          non_zero_finish = i + 31 - (uint32_t)__builtin_clz(mask_nonzero);
+        }
+        i += 32;
+        continue;
+      }
+    }
+#elif LIGHTER_PLATFORM_ARM64
+    if (has_neon && i + 16 <= data->data_end) {
+      uint8x16_t chunk = vld1q_u8(i);
+      uint8x16_t m_digit = lighter_simd_is_digit_neon(chunk);
+      uint8x16_t m_dot = vceqq_u8(chunk, vdupq_n_u8('.'));
+      uint8x16_t m_exp = vorrq_u8(vceqq_u8(chunk, vdupq_n_u8('e')), vceqq_u8(chunk, vdupq_n_u8('E')));
+      uint8x16_t m_delimit = vorrq_u8(m_dot, m_exp);
+      uint8x16_t m_invalid = vmvnq_u8(m_digit);
+
+      uint64_t mask_delimit = vgetq_lane_u64(vreinterpretq_u64_u8(m_delimit), 0) | vgetq_lane_u64(vreinterpretq_u64_u8(m_delimit), 1);
+      uint64_t mask_invalid = vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 0) | vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 1);
+
+      if (mask_delimit || mask_invalid) {
+        /* Exit SIMD for simplicity on action point */
+      } else {
+        /* Fast skip: update bounds */
+        uint8x16_t m_nonzero = vbicq_u8(m_digit, vceqq_u8(chunk, vdupq_n_u8('0')));
+        uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 0);
+        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 1);
+        if (!non_zero_start) {
+          if (low) {
+            non_zero_start = i + lighter_simd_first_set_neon(low);
+          } else if (high) {
+            non_zero_start = i + lighter_simd_first_set_neon(high) + 8;
+          }
+        }
+        if (high) {
+          non_zero_finish = i + 15 - (__builtin_clzll(high) >> 3);
+        } else if (low) {
+          non_zero_finish = i + 7 - (__builtin_clzll(low) >> 3);
+        }
+        i += 16;
+        continue;
+      }
+    }
+#elif LIGHTER_PLATFORM_RISCV
+    if (has_rvv && i < data->data_end) {
+      size_t n = (size_t)(data->data_end - i);
+      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+      vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
+      vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
+      vbool8_t m_dot = __riscv_vmseq_vx_u8m1_b8(chunk, '.', vl);
+      vbool8_t m_exp = __riscv_vmor_mm_b8(__riscv_vmseq_vx_u8m1_b8(chunk, 'e', vl), __riscv_vmseq_vx_u8m1_b8(chunk, 'E', vl), vl);
+      vbool8_t m_delimit = __riscv_vmor_mm_b8(m_dot, m_exp, vl);
+      vbool8_t m_invalid = __riscv_vmnot_m_b8(m_digit, vl);
+      intptr_t action = __riscv_vfirst_m_b8(__riscv_vmor_mm_b8(m_delimit, m_invalid, vl), vl);
+
+      if (action >= 0) {
+        vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
+        intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
+        if (fnz >= 0 && fnz < action) {
+          if (!non_zero_start) {
+            non_zero_start = i + fnz;
+          }
+          for (intptr_t j = action - 1; j >= fnz; --j) {
+            if (i[j] >= '1' && i[j] <= '9') {
+              non_zero_finish = i + j;
+              break;
+            }
+          }
+        }
+        i += action;
+      } else {
+        vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
+        intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
+        if (fnz >= 0) {
+          if (!non_zero_start) {
+            non_zero_start = i + fnz;
+          }
+          for (intptr_t j = (intptr_t)vl - 1; j >= fnz; --j) {
+            if (i[j] >= '1' && i[j] <= '9') {
+              non_zero_finish = i + j;
+              break;
+            }
+          }
+        }
+        i += vl;
+        continue;
+      }
+    }
+#endif
+
     switch (*i) {
       case '.':
         decimal = i;
@@ -71,12 +307,81 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
       default:
         number_end = i - 1;
     }
+    if (!number_end) {
+      i++;
+    }
   }
-  if (!number_end) {
-    for (; i < data->data_end && !number_end; ++i) {
+
+  if (!number_end && i < data->data_end) {
+    for (; i < data->data_end && !number_end;) {
+#if LIGHTER_PLATFORM_X86
+      if (has_avx2 && i + 32 <= data->data_end) {
+        __m256i chunk = _mm256_loadu_si256((const __m256i*)i);
+        uint32_t mask_invalid = ~lighter_simd_mask_avx2(lighter_simd_is_digit_avx2(chunk)) & 0xFFFFFFFF;
+        if (mask_invalid) {
+          uint32_t first_action = lighter_simd_first_set_avx2(mask_invalid);
+          if (!exponent_start && first_action > 0) {
+            exponent_start = i;
+          }
+          i += first_action;
+          number_end = i - 1;
+          break;
+        } else {
+          if (!exponent_start) {
+            exponent_start = i;
+          }
+          i += 32;
+          continue;
+        }
+      }
+#elif LIGHTER_PLATFORM_ARM64
+      if (has_neon && i + 16 <= data->data_end) {
+        uint8x16_t chunk = vld1q_u8(i);
+        uint8x16_t m_digit = lighter_simd_is_digit_neon(chunk);
+        uint8x16_t m_invalid = vmvnq_u8(m_digit);
+        uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 0);
+        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 1);
+        if (low || high) {
+          uint64_t first_action = low ? lighter_simd_first_set_neon(low) : lighter_simd_first_set_neon(high) + 8;
+          if (!exponent_start && first_action > 0) {
+            exponent_start = i;
+          }
+          i += first_action;
+          number_end = i - 1;
+          break;
+        } else {
+          if (!exponent_start) {
+            exponent_start = i;
+          }
+          i += 16;
+          continue;
+        }
+      }
+#elif LIGHTER_PLATFORM_RISCV
+      if (has_rvv && i < data->data_end) {
+        size_t n = (size_t)(data->data_end - i);
+        size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+        vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
+        vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
+        intptr_t invalid = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m_digit, vl), vl);
+        if (invalid >= 0) {
+          if (!exponent_start && invalid > 0) {
+            exponent_start = i;
+          }
+          i += invalid;
+          number_end = i - 1;
+          break;
+        } else {
+          if (!exponent_start) {
+            exponent_start = i;
+          }
+          i += vl;
+          continue;
+        }
+      }
+#endif
       switch (*i) {
         case '0':
-          break;
         case '1':
         case '2':
         case '3':
@@ -92,6 +397,9 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
           break;
         default:
           number_end = i - 1;
+      }
+      if (!number_end) {
+        i++;
       }
     }
   }
@@ -112,56 +420,87 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
   if (!exponent_start) {
     exponent_start = number_end;
   }
+  uint8_t* p;
   if (exponent) {
-    for (i = number_end; i >= exponent_start; --i) {
-      exponent_value += (*i - '0') * multiplier;
-      multiplier *= 10;
+    p = exponent + 1;
+    if (p < data->data_end && (*p == '+' || *p == '-')) {
+      ++p;
+    }
+    while (p < data->data_end && *p == '0') {
+      ++p;
+    }
+    exponent_start = p;
+    for (i = (uint8_t*)exponent_start; i <= number_end; ++i) {
+      if (exponent_value > 922337203685477580LL || (exponent_value == 922337203685477580LL && (*i - '0') > 7)) {
+        exponent_value = 9223372036854775807LL;
+        exponent_saturated = 1;
+      } else {
+        exponent_value = exponent_value * 10 + (*i - '0');
+      }
     }
   }
   if (negative_exponent) {
     exponent_value *= -1;
   }
-  max_exponent = (int64_t)(decimal    ? decimal > non_zero_start ? decimal - 1 : decimal
-                           : exponent ? exponent - 1
-                                      : number_end) -
-                 (int64_t)non_zero_start + exponent_value;
-  min_exponent = (int64_t)(decimal    ? decimal > non_zero_finish ? decimal - 1 : decimal
-                           : exponent ? exponent - 1
-                                      : number_end) -
-                 (int64_t)non_zero_finish + exponent_value;
+  int64_t delta_max = (int64_t)(decimal ? decimal > non_zero_start ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_start;
+  int64_t delta_min = (int64_t)(decimal ? decimal > non_zero_finish ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_finish;
 
-  if (-precision > max_exponent) {
-    if (negative) {
-      --(data->rindex);
-    }
-    lighter_write_data(data, number_end - data->rindex);
-    *data->windex++ = '0';
-    return;
+  int is_huge = exponent_saturated;
+  if (LIGHTER_ADD_OVERFLOW(exponent_value, delta_max, &max_exponent)) {
+    is_huge = 1;
   }
-  if (-precision > min_exponent) {
-    min_exponent = -precision;
-    i = (decimal ? decimal > data->rindex + precision ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) + precision + exponent_value;
-    if (i < non_zero_finish) {
-      if (*(i + 1) >= '5') {
-        for (; i >= non_zero_start; --i) {
-          if (*i == '9') {
-            ++min_exponent;
-          } else if (*i != '.') {
-            ++*i;
-            break;
+  if (LIGHTER_ADD_OVERFLOW(exponent_value, delta_min, &min_exponent)) {
+    is_huge = 1;
+  }
+
+  if (precision == LIGHTER_PRECISION_UNLIMITED) {
+    /* Skip rounding */
+  } else if (is_huge) {
+    /* Huge exponent handling for rounding */
+    if (exponent_value < 0) {
+      /* Effectively rounds to zero if precision is within int64_t limits */
+      if (negative) {
+        --(data->rindex);
+      }
+      lighter_write_data(data, number_end - data->rindex);
+      *data->windex++ = '0';
+      return;
+    }
+    /* Else huge positive: rounding point is infinitely far to the right, so it's a no-op on digits */
+  } else {
+    if (-precision > max_exponent) {
+      if (negative) {
+        --(data->rindex);
+      }
+      lighter_write_data(data, number_end - data->rindex);
+      *data->windex++ = '0';
+      return;
+    }
+    if (-precision > min_exponent) {
+      min_exponent = -precision;
+      i = (decimal ? decimal > data->rindex + precision ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) + precision + exponent_value;
+      if (i < non_zero_finish) {
+        if (*(i + 1) >= '5') {
+          for (; i >= non_zero_start; --i) {
+            if (*i == '9') {
+              ++min_exponent;
+            } else if (*i != '.') {
+              ++*i;
+              break;
+            }
+          }
+          if (i < non_zero_start) {
+            *(++i) = '1';
+            ++max_exponent;
           }
         }
-        if (i < non_zero_start) {
-          *(++i) = '1';
-          ++max_exponent;
+        while (i >= non_zero_start && *i == '0') {
+          --i;
+          ++min_exponent;
         }
       }
-      while (i >= non_zero_start && *i == '0') {
-        --i;
-        ++min_exponent;
-      }
+      non_zero_finish = i;
     }
-    non_zero_finish = i;
   }
 
   digit_width = max_exponent - min_exponent + 1;
@@ -176,6 +515,10 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
     }
   } else {
     new_exponent = min_exponent;
+    zeroes = 0;
+  }
+  if (is_huge) {
+    new_exponent = 1; /* Trigger scientific notation output path */
     zeroes = 0;
   }
   if (non_zero_start > data->rindex) {
@@ -246,36 +589,60 @@ static inline void lighter_do_number(LighterData* data, int64_t precision) {
   if (exponent > data->rindex) {
     lighter_write_data(data, exponent - data->rindex);
   }
-  if (new_exponent) {
-    for (int64_t x = 1; new_exponent / x; x *= 10) {
-      ++new_exponent_width;
-    }
-    if (exponent_value == new_exponent && number_end - exponent == new_exponent_width + negative_exponent) {
-      data->rindex += new_exponent_width + negative_exponent + 1;
-    } else {
-      lighter_write_data(data, exponent_start ? exponent_start - data->rindex : 0);
+  if (new_exponent || is_huge) {
+    if (is_huge) {
+      /* Positional minimal length reformatting for huge exponents */
+      lighter_write_data(data, non_zero_finish + 1 - data->rindex);
       *data->windex++ = 'E';
-      if (new_exponent < 0) {
-        *data->windex++ = '-';
+      int64_t shift =
+          (int64_t)(decimal ? (decimal > non_zero_finish ? decimal - 1 : decimal) : (exponent ? exponent - 1 : number_end)) - (int64_t)non_zero_finish;
+      lighter_write_adjusted_exponent(data, exponent_start, number_end - exponent_start + 1, negative_exponent, shift);
+      data->rindex = number_end + 1;
+      data->lindex = data->rindex;
+    } else {
+      int64_t temp = new_exponent < 0 ? -new_exponent : new_exponent;
+      while (temp) {
+        temp /= 10;
+        ++new_exponent_width;
       }
-      if (new_exponent == exponent_value) {
-        data->rindex += new_exponent_width;
+      if (new_exponent == 0) {
+        new_exponent_width = 1;
+      }
+
+      if (!is_huge && exponent_value == new_exponent && number_end - exponent == new_exponent_width + negative_exponent) {
+        data->rindex += new_exponent_width + negative_exponent + 1;
       } else {
-        data->windex += new_exponent_width - 1;
+        lighter_write_data(data, exponent_start ? exponent_start - data->rindex : 0);
+        *data->windex++ = 'E';
         if (new_exponent < 0) {
-          new_exponent = -new_exponent;
+          *data->windex++ = '-';
         }
-        while (new_exponent) {
-          *data->windex-- = new_exponent % 10 + '0';
-          new_exponent /= 10;
+        if (new_exponent == exponent_value) {
+          data->rindex += new_exponent_width;
+          lighter_write_data(data, 0);
+        } else {
+          data->windex += new_exponent_width - 1;
+          if (new_exponent < 0) {
+            new_exponent = -new_exponent;
+          }
+          while (new_exponent) {
+            *data->windex-- = new_exponent % 10 + '0';
+            new_exponent /= 10;
+          }
+          data->windex += new_exponent_width + 1;
         }
-        data->windex += new_exponent_width + 1;
       }
     }
   }
   if (number_end > data->rindex) {
     lighter_write_data(data, number_end - data->rindex);
   }
+}
+
+/** Parse and optionally reformat a JSON number. precision: LIGHTER_PRECISION_UNLIMITED = preserve form. */
+static inline void lighter_do_number(LighterData* data, int64_t precision) {
+  lighter_do_number_impl(data, precision, lighter_cpu_supports_avx512bw(), lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(),
+                         lighter_cpu_supports_rvv());
 }
 
 #endif /* LIGHTER_NUMBER_H */

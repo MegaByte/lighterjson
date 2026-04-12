@@ -137,7 +137,7 @@ static inline void lighter_string_do_escape(LighterData* data) {
   }
 }
 
-#include "lighter_cpu.h"
+#include "lighter_simd.h"
 
 static inline void lighter_do_string_impl(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   uint8_t* start = data->lindex;
@@ -146,96 +146,80 @@ static inline void lighter_do_string_impl(LighterData* data, int disable_nfc, in
 
   while (run < end) {
     uint8_t* p = run;
-    #if LIGHTER_PLATFORM_X86
-      if (has_avx512) {
-        __m512i quotes = _mm512_set1_epi8('"');
-        __m512i backslashes = _mm512_set1_epi8('\\');
-        while (p + 64 <= end) {
-          __m512i chunk = _mm512_loadu_si512((const void*)p);
-          __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, backslashes);
-          if (mask != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, mask);
-              p += offset;
-            #else
-              p += __builtin_ctzll(mask);
-            #endif
-            break;
-          }
-          p += 64;
+#if LIGHTER_PLATFORM_X86
+    if (has_avx512) {
+      __m512i quotes = _mm512_set1_epi8('"');
+      __m512i backslashes = _mm512_set1_epi8('\\');
+      while (p + 64 <= end) {
+        __m512i chunk = _mm512_loadu_si512((const void*)p);
+        __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, backslashes);
+        if (mask != 0) {
+  #if defined(_MSC_VER)
+          unsigned long offset;
+          _BitScanForward64(&offset, mask);
+          p += offset;
+  #else
+          p += __builtin_ctzll(mask);
+  #endif
+          break;
         }
-      } else if (has_avx2) {
-        __m256i quotes = _mm256_set1_epi8('"');
-        __m256i backslashes = _mm256_set1_epi8('\\');
-        while (p + 32 <= end) {
-          __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
-          __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, backslashes));
-          uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
-          if (mask != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward(&offset, mask);
-              p += offset;
-            #else
-              p += __builtin_ctz(mask);
-            #endif
-            break;
-          }
-          p += 32;
-        }
+        p += 64;
       }
-    #elif LIGHTER_PLATFORM_ARM64
-      if (has_neon) {
-        uint8x16_t quotes = vdupq_n_u8('"');
-        uint8x16_t backslashes = vdupq_n_u8('\\');
-        while (p + 16 <= end) {
-          uint8x16_t chunk = vld1q_u8(p);
-          uint8x16_t m = vorrq_u8(vceqq_u8(chunk, quotes), vceqq_u8(chunk, backslashes));
-          uint64x2_t u64 = vreinterpretq_u64_u8(m);
-          uint64_t low = vgetq_lane_u64(u64, 0);
-          uint64_t high = vgetq_lane_u64(u64, 1);
-          if (low != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, low);
-              p += (offset >> 3);
-            #else
-              p += (__builtin_ctzll(low) >> 3);
-            #endif
-            break;
-          } else if (high != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, high);
-              p += (offset >> 3) + 8;
-            #else
-              p += (__builtin_ctzll(high) >> 3) + 8;
-            #endif
-            break;
-          }
-          p += 16;
+    } else if (has_avx2) {
+      __m256i quotes = _mm256_set1_epi8('"');
+      __m256i backslashes = _mm256_set1_epi8('\\');
+      while (p + 32 <= end) {
+        __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+        __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, backslashes));
+        uint32_t mask = lighter_simd_mask_avx2(m);
+        if (mask != 0) {
+          p += lighter_simd_first_set_avx2(mask);
+          break;
         }
+        p += 32;
       }
-    #elif LIGHTER_PLATFORM_RISCV
-      if (has_rvv) {
-        while (p < end) {
-          size_t n = end - p;
-          size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-          vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-          vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\\', vl), vl);
-          intptr_t index = __riscv_vfirst_m_b8(m, vl);
-          if (index >= 0) {
-            p += index;
-            break;
-          }
-          p += vl;
+    }
+#elif LIGHTER_PLATFORM_ARM64
+    if (has_neon) {
+      uint8x16_t quotes = vdupq_n_u8('"');
+      uint8x16_t backslashes = vdupq_n_u8('\\');
+      while (p + 16 <= end) {
+        uint8x16_t chunk = vld1q_u8(p);
+        uint8x16_t m = vorrq_u8(vceqq_u8(chunk, quotes), vceqq_u8(chunk, backslashes));
+        uint64x2_t u64 = vreinterpretq_u64_u8(m);
+        uint64_t low = vgetq_lane_u64(u64, 0);
+        uint64_t high = vgetq_lane_u64(u64, 1);
+        if (low != 0) {
+          p += lighter_simd_first_set_neon(low);
+          break;
+        } else if (high != 0) {
+          p += lighter_simd_first_set_neon(high) + 8;
+          break;
         }
+        p += 16;
       }
-    #endif
+    }
+#elif LIGHTER_PLATFORM_RISCV
+    if (has_rvv) {
+      while (p < end) {
+        size_t n = end - p;
+        size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+        vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+        vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\\', vl), vl);
+        intptr_t index = __riscv_vfirst_m_b8(m, vl);
+        if (index >= 0) {
+          p += index;
+          break;
+        }
+        p += vl;
+      }
+    }
+#endif
     run = p;
-    if (run >= end) break;
+    if (run >= end) {
+      break;
+    }
 
     switch (*run) {
       case '\\':
@@ -269,16 +253,17 @@ static inline void lighter_do_string_impl(LighterData* data, int disable_nfc, in
 static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   uint8_t* start = data->rindex;
   ++(data->rindex);
-  if (has_avx512)
+  if (has_avx512) {
     lighter_do_string_impl(data, disable_nfc, 1, 0, 0, 0);
-  else if (has_avx2)
+  } else if (has_avx2) {
     lighter_do_string_impl(data, disable_nfc, 0, 1, 0, 0);
-  else if (has_neon)
+  } else if (has_neon) {
     lighter_do_string_impl(data, disable_nfc, 0, 0, 1, 0);
-  else if (has_rvv)
+  } else if (has_rvv) {
     lighter_do_string_impl(data, disable_nfc, 0, 0, 0, 1);
-  else
+  } else {
     lighter_do_string_impl(data, disable_nfc, 0, 0, 0, 0);
+  }
 }
 
 #endif /* LIGHTER_STRING_H */

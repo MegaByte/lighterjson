@@ -2,8 +2,8 @@
  * @file      lighterjson.c
  * @brief     JSON minifier
  * @author    Aaron Kaluszka
- * @version   1.0.0
- * @date      21 Feb 2026
+ * @version   2.0.0
+ * @date      11 Apr 2026
  * @copyright Copyright 2017-2026 Aaron Kaluszka
  *            Licensed under the Apache License, Version 2.0 (the "License");
  *            you may not use this file except in compliance with the License.
@@ -32,8 +32,6 @@
   #include <sys/mman.h>
   #include <sys/stat.h>
   #include <unistd.h>
-
-  #include "lighter_transcode.h"
 #endif
 
 #include "lighter_bitfield.h"
@@ -42,6 +40,7 @@
 #include "lighter_memmap.h"
 #include "lighter_number.h"
 #include "lighter_string.h"
+#include "lighter_transcode.h"
 
 typedef struct LighterContext {
   int64_t precision;
@@ -65,110 +64,117 @@ static int do_file(LighterContext* ctx, char filename[]);
 static int do_dir(LighterContext* ctx, PathBuffer* pb);
 
 static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  #if LIGHTER_PLATFORM_X86
-    if (has_avx512) {
-      __m512i spaces = _mm512_set1_epi8(' ');
-      __m512i tabs = _mm512_set1_epi8('\t');
-      __m512i crs = _mm512_set1_epi8('\r');
-      __m512i lfs = _mm512_set1_epi8('\n');
-      while (run + 64 <= end) {
-        __m512i chunk = _mm512_loadu_si512((const void*)run);
-        __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs);
-        if (include_newline)
-          mask |= _mm512_cmpeq_epi8_mask(chunk, lfs);
-        if (mask != 0xFFFFFFFFFFFFFFFFULL) {
-          #if defined(_MSC_VER)
-            unsigned long offset;
-            _BitScanForward64(&offset, ~mask);
-            return run + offset;
-          #else
-            return run + __builtin_ctzll(~mask);
-          #endif
-        }
-        run += 64;
+#if LIGHTER_PLATFORM_X86
+  if (has_avx512) {
+    __m512i spaces = _mm512_set1_epi8(' ');
+    __m512i tabs = _mm512_set1_epi8('\t');
+    __m512i crs = _mm512_set1_epi8('\r');
+    __m512i lfs = _mm512_set1_epi8('\n');
+    while (run + 64 <= end) {
+      __m512i chunk = _mm512_loadu_si512((const void*)run);
+      __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs);
+      if (include_newline) {
+        mask |= _mm512_cmpeq_epi8_mask(chunk, lfs);
       }
-    } else if (has_avx2) {
-      __m256i spaces = _mm256_set1_epi8(' ');
-      __m256i tabs = _mm256_set1_epi8('\t');
-      __m256i crs = _mm256_set1_epi8('\r');
-      __m256i lfs = _mm256_set1_epi8('\n');
-      while (run + 32 <= end) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)run);
-        __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, spaces), _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs), _mm256_cmpeq_epi8(chunk, crs)));
-        if (include_newline)
-          m = _mm256_or_si256(m, _mm256_cmpeq_epi8(chunk, lfs));
-        uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
-        if (mask != 0xFFFFFFFF) {
-          #if defined(_MSC_VER)
-            unsigned long offset;
-            _BitScanForward(&offset, ~mask);
-            return run + offset;
-          #else
-            return run + __builtin_ctz(~mask);
-          #endif
-        }
-        run += 32;
-      }
-    }
-  #elif LIGHTER_PLATFORM_ARM64
-    if (has_neon) {
-      uint8x16_t spaces = vdupq_n_u8(' ');
-      uint8x16_t tabs = vdupq_n_u8('\t');
-      uint8x16_t crs = vdupq_n_u8('\r');
-      uint8x16_t lfs = vdupq_n_u8('\n');
-      while (run + 16 <= end) {
-        uint8x16_t chunk = vld1q_u8(run);
-        uint8x16_t m = vorrq_u8(vceqq_u8(chunk, spaces), vorrq_u8(vceqq_u8(chunk, tabs), vceqq_u8(chunk, crs)));
-        if (include_newline)
-          m = vorrq_u8(m, vceqq_u8(chunk, lfs));
-        uint64x2_t u64 = vreinterpretq_u64_u8(m);
-        uint64_t low = vgetq_lane_u64(u64, 0);
-        uint64_t high = vgetq_lane_u64(u64, 1);
-        if (low != 0xFFFFFFFFFFFFFFFFULL) {
-          #if defined(_MSC_VER)
-            unsigned long offset;
-            _BitScanForward64(&offset, ~low);
-            return run + (offset >> 3);
-          #else
-            return run + (__builtin_ctzll(~low) >> 3);
-          #endif
-        } else if (high != 0xFFFFFFFFFFFFFFFFULL) {
-          #if defined(_MSC_VER)
-            unsigned long offset;
-            _BitScanForward64(&offset, ~high);
-            return run + (offset >> 3) + 8;
-          #else
-            return run + (__builtin_ctzll(~high) >> 3) + 8;
-          #endif
-        }
-        run += 16;
-      }
-    }
-  #elif LIGHTER_PLATFORM_RISCV
-    if (has_rvv) {
-      while (run < end) {
-        size_t n = end - run;
-        size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-        vuint8m1_t chunk = __riscv_vle8_v_u8m1(run, vl);
-        vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
-        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
-        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
-        if (include_newline)
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
-        intptr_t index = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m, vl), vl);
-        if (index >= 0)
-          return run + index;
-        run += vl;
-      }
-    }
+      if (mask != 0xFFFFFFFFFFFFFFFFULL) {
+  #if defined(_MSC_VER)
+        unsigned long offset;
+        _BitScanForward64(&offset, ~mask);
+        return run + offset;
+  #else
+        return run + __builtin_ctzll(~mask);
   #endif
+      }
+      run += 64;
+    }
+  } else if (has_avx2) {
+    __m256i spaces = _mm256_set1_epi8(' ');
+    __m256i tabs = _mm256_set1_epi8('\t');
+    __m256i crs = _mm256_set1_epi8('\r');
+    __m256i lfs = _mm256_set1_epi8('\n');
+    while (run + 32 <= end) {
+      __m256i chunk = _mm256_loadu_si256((const __m256i*)run);
+      __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, spaces), _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs), _mm256_cmpeq_epi8(chunk, crs)));
+      if (include_newline) {
+        m = _mm256_or_si256(m, _mm256_cmpeq_epi8(chunk, lfs));
+      }
+      uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
+      if (mask != 0xFFFFFFFF) {
+  #if defined(_MSC_VER)
+        unsigned long offset;
+        _BitScanForward(&offset, ~mask);
+        return run + offset;
+  #else
+        return run + __builtin_ctz(~mask);
+  #endif
+      }
+      run += 32;
+    }
+  }
+#elif LIGHTER_PLATFORM_ARM64
+  if (has_neon) {
+    uint8x16_t spaces = vdupq_n_u8(' ');
+    uint8x16_t tabs = vdupq_n_u8('\t');
+    uint8x16_t crs = vdupq_n_u8('\r');
+    uint8x16_t lfs = vdupq_n_u8('\n');
+    while (run + 16 <= end) {
+      uint8x16_t chunk = vld1q_u8(run);
+      uint8x16_t m = vorrq_u8(vceqq_u8(chunk, spaces), vorrq_u8(vceqq_u8(chunk, tabs), vceqq_u8(chunk, crs)));
+      if (include_newline) {
+        m = vorrq_u8(m, vceqq_u8(chunk, lfs));
+      }
+      uint64x2_t u64 = vreinterpretq_u64_u8(m);
+      uint64_t low = vgetq_lane_u64(u64, 0);
+      uint64_t high = vgetq_lane_u64(u64, 1);
+      if (low != 0xFFFFFFFFFFFFFFFFULL) {
+  #if defined(_MSC_VER)
+        unsigned long offset;
+        _BitScanForward64(&offset, ~low);
+        return run + (offset >> 3);
+  #else
+        return run + (__builtin_ctzll(~low) >> 3);
+  #endif
+      } else if (high != 0xFFFFFFFFFFFFFFFFULL) {
+  #if defined(_MSC_VER)
+        unsigned long offset;
+        _BitScanForward64(&offset, ~high);
+        return run + (offset >> 3) + 8;
+  #else
+        return run + (__builtin_ctzll(~high) >> 3) + 8;
+  #endif
+      }
+      run += 16;
+    }
+  }
+#elif LIGHTER_PLATFORM_RISCV
+  if (has_rvv) {
+    while (run < end) {
+      size_t n = end - run;
+      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+      vuint8m1_t chunk = __riscv_vle8_v_u8m1(run, vl);
+      vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
+      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
+      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
+      if (include_newline) {
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
+      }
+      intptr_t index = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m, vl), vl);
+      if (index >= 0) {
+        return run + index;
+      }
+      run += vl;
+    }
+  }
+#endif
 
   if (include_newline) {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r'))
+    while (run < end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r')) {
       ++run;
+    }
   } else {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\r'))
+    while (run < end && (*run == ' ' || *run == '\t' || *run == '\r')) {
       ++run;
+    }
   }
   return run;
 }
@@ -178,26 +184,32 @@ void skip_whitespace_run(LighterData* data, int include_newline, LighterContext*
   uint8_t* end = data->data_end;
 
 #if LIGHTER_PLATFORM_X86
-  if (ctx->has_avx512)
+  if (ctx->has_avx512) {
     run = skip_whitespace_impl(run, end, include_newline, 1, 0, 0, 0);
-  else if (ctx->has_avx2)
+  } else if (ctx->has_avx2) {
     run = skip_whitespace_impl(run, end, include_newline, 0, 1, 0, 0);
+  }
 #elif LIGHTER_PLATFORM_ARM64
-  if (ctx->has_neon)
+  if (ctx->has_neon) {
     run = skip_whitespace_impl(run, end, include_newline, 0, 0, 1, 0);
+  }
 #elif LIGHTER_PLATFORM_RISCV
-  if (ctx->has_rvv)
+  if (ctx->has_rvv) {
     run = skip_whitespace_impl(run, end, include_newline, 0, 0, 0, 1);
+  }
 #endif
-  else
+  else {
     run = skip_whitespace_impl(run, end, include_newline, 0, 0, 0, 0);
+  }
 
   if (include_newline) {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r'))
+    while (run < end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r')) {
       ++run;
+    }
   } else {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\r'))
+    while (run < end && (*run == ' ' || *run == '\t' || *run == '\r')) {
       ++run;
+    }
   }
   lighter_write_data(data, run - data->rindex);
 }
@@ -270,150 +282,152 @@ static void do_object(LighterData* data, LighterContext* ctx, int line_start) {
   }
 }
 
-static void do_number(LighterData* data, LighterContext* ctx) {
-  lighter_do_number(data, ctx->precision);
+static void do_number(LighterData* data, LighterContext* ctx, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  lighter_do_number_impl(data, ctx->precision, has_avx512, has_avx2, has_neon, has_rvv);
 }
 
 static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   while (data->rindex < data->data_end) {
     uint8_t* p = data->rindex;
-    #if LIGHTER_PLATFORM_X86
-      if (has_avx512) {
-        __m512i spaces = _mm512_set1_epi8(' ');
-        __m512i tabs = _mm512_set1_epi8('\t');
-        __m512i crs = _mm512_set1_epi8('\r');
-        __m512i lfs = _mm512_set1_epi8('\n');
-        __m512i quotes = _mm512_set1_epi8('"');
-        __m512i minus = _mm512_set1_epi8('-');
-        while (p + 64 <= data->data_end) {
-          __m512i chunk = _mm512_loadu_si512((const void*)p);
-          __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs) |
-                           _mm512_cmpeq_epi8_mask(chunk, lfs) | _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, minus) |
-                           (_mm512_cmpge_epi8_mask(chunk, _mm512_set1_epi8('0')) & _mm512_cmple_epi8_mask(chunk, _mm512_set1_epi8('9')));
-          if (mask != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, mask);
-              p += offset;
-            #else
-              p += __builtin_ctzll(mask);
-            #endif
-            break;
-          }
-          p += 64;
+#if LIGHTER_PLATFORM_X86
+    if (has_avx512) {
+      __m512i spaces = _mm512_set1_epi8(' ');
+      __m512i tabs = _mm512_set1_epi8('\t');
+      __m512i crs = _mm512_set1_epi8('\r');
+      __m512i lfs = _mm512_set1_epi8('\n');
+      __m512i quotes = _mm512_set1_epi8('"');
+      __m512i minus = _mm512_set1_epi8('-');
+      while (p + 64 <= data->data_end) {
+        __m512i chunk = _mm512_loadu_si512((const void*)p);
+        __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs) |
+                         _mm512_cmpeq_epi8_mask(chunk, lfs) | _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, minus) |
+                         (_mm512_cmpge_epi8_mask(chunk, _mm512_set1_epi8('0')) & _mm512_cmple_epi8_mask(chunk, _mm512_set1_epi8('9')));
+        if (mask != 0) {
+  #if defined(_MSC_VER)
+          unsigned long offset;
+          _BitScanForward64(&offset, mask);
+          p += offset;
+  #else
+          p += __builtin_ctzll(mask);
+  #endif
+          break;
         }
-      } else if (has_avx2) {
-        __m256i spaces = _mm256_set1_epi8(' ');
-        __m256i tabs = _mm256_set1_epi8('\t');
-        __m256i crs = _mm256_set1_epi8('\r');
-        __m256i lfs = _mm256_set1_epi8('\n');
-        __m256i quotes = _mm256_set1_epi8('"');
-        __m256i minus = _mm256_set1_epi8('-');
-        while (p + 32 <= data->data_end) {
-          __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
-          __m256i m = _mm256_or_si256(
-              _mm256_cmpeq_epi8(chunk, spaces),
-              _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs),
-                              _mm256_or_si256(_mm256_cmpeq_epi8(chunk, crs),
-                                              _mm256_or_si256(_mm256_cmpeq_epi8(chunk, lfs),
-                                                              _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, minus))))));
-          __m256i digits = _mm256_and_si256(_mm256_cmpgt_epi8(chunk, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), chunk));
-          m = _mm256_or_si256(m, digits);
-          uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
-          if (mask != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward(&offset, mask);
-              p += offset;
-            #else
-              p += __builtin_ctz(mask);
-            #endif
-            break;
-          }
-          p += 32;
-        }
+        p += 64;
       }
-    #elif LIGHTER_PLATFORM_ARM64
-      if (has_neon) {
-        uint8x16_t spaces = vdupq_n_u8(' ');
-        uint8x16_t tabs = vdupq_n_u8('\t');
-        uint8x16_t crs = vdupq_n_u8('\r');
-        uint8x16_t lfs = vdupq_n_u8('\n');
-        uint8x16_t quotes = vdupq_n_u8('"');
-        uint8x16_t minus = vdupq_n_u8('-');
-        while (p + 16 <= data->data_end) {
-          uint8x16_t chunk = vld1q_u8(p);
-          uint8x16_t m =
-              vorrq_u8(vceqq_u8(chunk, spaces),
-                       vorrq_u8(vceqq_u8(chunk, tabs),
-                                vorrq_u8(vceqq_u8(chunk, crs), vorrq_u8(vceqq_u8(chunk, lfs), vorrq_u8(vceqq_u8(chunk, quotes), vceqq_u8(chunk, minus))))));
-          uint8x16_t digits = vandq_u8(vcgeq_u8(chunk, vdupq_n_u8('0')), vcleq_u8(chunk, vdupq_n_u8('9')));
-          m = vorrq_u8(m, digits);
-          uint64x2_t u64 = vreinterpretq_u64_u8(m);
-          uint64_t low = vgetq_lane_u64(u64, 0);
-          uint64_t high = vgetq_lane_u64(u64, 1);
-          if (low != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, low);
-              p += (offset >> 3);
-            #else
-              p += (__builtin_ctzll(low) >> 3);
-            #endif
-            break;
-          } else if (high != 0) {
-            #if defined(_MSC_VER)
-              unsigned long offset;
-              _BitScanForward64(&offset, high);
-              p += (offset >> 3) + 8;
-            #else
-              p += (__builtin_ctzll(high) >> 3) + 8;
-            #endif
-            break;
-          }
-          p += 16;
+    } else if (has_avx2) {
+      __m256i spaces = _mm256_set1_epi8(' ');
+      __m256i tabs = _mm256_set1_epi8('\t');
+      __m256i crs = _mm256_set1_epi8('\r');
+      __m256i lfs = _mm256_set1_epi8('\n');
+      __m256i quotes = _mm256_set1_epi8('"');
+      __m256i minus = _mm256_set1_epi8('-');
+      while (p + 32 <= data->data_end) {
+        __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+        __m256i m = _mm256_or_si256(
+            _mm256_cmpeq_epi8(chunk, spaces),
+            _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs),
+                            _mm256_or_si256(_mm256_cmpeq_epi8(chunk, crs),
+                                            _mm256_or_si256(_mm256_cmpeq_epi8(chunk, lfs),
+                                                            _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, minus))))));
+        __m256i digits = _mm256_and_si256(_mm256_cmpgt_epi8(chunk, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), chunk));
+        m = _mm256_or_si256(m, digits);
+        uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
+        if (mask != 0) {
+  #if defined(_MSC_VER)
+          unsigned long offset;
+          _BitScanForward(&offset, mask);
+          p += offset;
+  #else
+          p += __builtin_ctz(mask);
+  #endif
+          break;
         }
+        p += 32;
       }
-    #elif LIGHTER_PLATFORM_RISCV
-      if (has_rvv) {
-        while (p < data->data_end) {
-          size_t n = data->data_end - p;
-          size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-          vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-          vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl), vl);
-          m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '-', vl), vl);
-          vbool8_t digits = __riscv_vmand_mm_b8(__riscv_vmsgeu_vx_u8m1_b8(chunk, '0', vl), __riscv_vmsleu_vx_u8m1_b8(chunk, '9', vl), vl);
-          m = __riscv_vmor_mm_b8(m, digits, vl);
-          intptr_t index = __riscv_vfirst_m_b8(m, vl);
-          if (index >= 0) {
-            p += index;
-            break;
-          }
-          p += vl;
+    }
+#elif LIGHTER_PLATFORM_ARM64
+    if (has_neon) {
+      uint8x16_t spaces = vdupq_n_u8(' ');
+      uint8x16_t tabs = vdupq_n_u8('\t');
+      uint8x16_t crs = vdupq_n_u8('\r');
+      uint8x16_t lfs = vdupq_n_u8('\n');
+      uint8x16_t quotes = vdupq_n_u8('"');
+      uint8x16_t minus = vdupq_n_u8('-');
+      while (p + 16 <= data->data_end) {
+        uint8x16_t chunk = vld1q_u8(p);
+        uint8x16_t m =
+            vorrq_u8(vceqq_u8(chunk, spaces),
+                     vorrq_u8(vceqq_u8(chunk, tabs),
+                              vorrq_u8(vceqq_u8(chunk, crs), vorrq_u8(vceqq_u8(chunk, lfs), vorrq_u8(vceqq_u8(chunk, quotes), vceqq_u8(chunk, minus))))));
+        uint8x16_t digits = vandq_u8(vcgeq_u8(chunk, vdupq_n_u8('0')), vcleq_u8(chunk, vdupq_n_u8('9')));
+        m = vorrq_u8(m, digits);
+        uint64x2_t u64 = vreinterpretq_u64_u8(m);
+        uint64_t low = vgetq_lane_u64(u64, 0);
+        uint64_t high = vgetq_lane_u64(u64, 1);
+        if (low != 0) {
+  #if defined(_MSC_VER)
+          unsigned long offset;
+          _BitScanForward64(&offset, low);
+          p += (offset >> 3);
+  #else
+          p += (__builtin_ctzll(low) >> 3);
+  #endif
+          break;
+        } else if (high != 0) {
+  #if defined(_MSC_VER)
+          unsigned long offset;
+          _BitScanForward64(&offset, high);
+          p += (offset >> 3) + 8;
+  #else
+          p += (__builtin_ctzll(high) >> 3) + 8;
+  #endif
+          break;
         }
+        p += 16;
       }
-    #endif
+    }
+#elif LIGHTER_PLATFORM_RISCV
+    if (has_rvv) {
+      while (p < data->data_end) {
+        size_t n = data->data_end - p;
+        size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+        vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+        vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '"', vl), vl);
+        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '-', vl), vl);
+        vbool8_t digits = __riscv_vmand_mm_b8(__riscv_vmsgeu_vx_u8m1_b8(chunk, '0', vl), __riscv_vmsleu_vx_u8m1_b8(chunk, '9', vl), vl);
+        m = __riscv_vmor_mm_b8(m, digits, vl);
+        intptr_t index = __riscv_vfirst_m_b8(m, vl);
+        if (index >= 0) {
+          p += index;
+          break;
+        }
+        p += vl;
+      }
+    }
+#endif
     data->rindex = p;
-    if (data->rindex >= data->data_end)
+    if (data->rindex >= data->data_end) {
       break;
+    }
 
     uint8_t c = *data->rindex;
     if (c == '"') {
       do_string(data, ctx);
     } else if (c == '-' || (c >= '0' && c <= '9')) {
-      do_number(data, ctx);
+      do_number(data, ctx, has_avx512, has_avx2, has_neon, has_rvv);
     } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
       if (c == '\n') {
-        if (line_start == 1)
+        if (line_start == 1) {
           --line_start;
-        else if (line_start == 2)
+        } else if (line_start == 2) {
           ++(data->rindex);
-        else
+        } else {
           skip_whitespace_run(data, 1, ctx);
+        }
       } else {
         skip_whitespace_run(data, line_start ? 0 : 1, ctx);
       }
@@ -425,16 +439,17 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
 
 static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
   if (!ctx->safe_mode) {
-    if (ctx->has_avx512)
+    if (ctx->has_avx512) {
       do_value_blind_impl(data, ctx, line_start, 1, 0, 0, 0);
-    else if (ctx->has_avx2)
+    } else if (ctx->has_avx2) {
       do_value_blind_impl(data, ctx, line_start, 0, 1, 0, 0);
-    else if (ctx->has_neon)
+    } else if (ctx->has_neon) {
       do_value_blind_impl(data, ctx, line_start, 0, 0, 1, 0);
-    else if (ctx->has_rvv)
+    } else if (ctx->has_rvv) {
       do_value_blind_impl(data, ctx, line_start, 0, 0, 0, 1);
-    else
+    } else {
       do_value_blind_impl(data, ctx, line_start, 0, 0, 0, 0);
+    }
     return 0;
   }
   Bitfield parent_types;
@@ -508,7 +523,7 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
       case '7':
       case '8':
       case '9':
-        do_number(data, ctx);
+        do_number(data, ctx, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
         comma_ok = 1;
         break;
       case '\n':
@@ -670,8 +685,9 @@ static int do_file(LighterContext* ctx, char filename[]) {
     if (max_utf8 > orig_size) {
       lighter_map_truncate(&map, max_utf8);
       lighter_map_close(&map);
-      if (lighter_map_open(&map, filename, 0) != 0)
+      if (lighter_map_open(&map, filename, 0) != 0) {
         return EXIT_FAILURE;
+      }
       memmove(map.data + max_utf8 - orig_size, map.data, orig_size);
       size_t utf8_size;
       lighter_transcode_to_utf8(map.data + max_utf8 - orig_size, orig_size, map.data, orig_enc, &utf8_size);
@@ -863,11 +879,13 @@ int main(int argc, char* argv[]) {
     PathBuffer pb;
     pb.cap = 4096;
     size_t arg_len = strlen(argv[optind_val]);
-    if (arg_len + 1 > pb.cap)
+    if (arg_len + 1 > pb.cap) {
       pb.cap = arg_len + 1;
+    }
     pb.buf = (char*)malloc(pb.cap);
-    if (!pb.buf)
+    if (!pb.buf) {
       return EXIT_FAILURE;
+    }
     strcpy(pb.buf, argv[optind_val]);
     int ret = do_dir(&ctx, &pb);
     free(pb.buf);
@@ -879,11 +897,13 @@ int main(int argc, char* argv[]) {
     PathBuffer pb;
     pb.cap = 4096;
     size_t arg_len = strlen(argv[optind_val]);
-    if (arg_len + 1 > pb.cap)
+    if (arg_len + 1 > pb.cap) {
       pb.cap = arg_len + 1;
+    }
     pb.buf = (char*)malloc(pb.cap);
-    if (!pb.buf)
+    if (!pb.buf) {
       return EXIT_FAILURE;
+    }
     strcpy(pb.buf, argv[optind_val]);
     int ret = do_dir(&ctx, &pb);
     free(pb.buf);

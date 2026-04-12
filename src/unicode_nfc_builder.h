@@ -461,9 +461,9 @@ static NfcData* nfc_load_from_ucd(const char* ucd_dir) {
           uint8_t qv = NFC_QC_YES;
           if (*s == 'N') {
             qv = NFC_QC_NO;
-          } else if (*s == 'M')
+          } else if (*s == 'M') {
             qv = NFC_QC_MAYBE;
-          else {
+          } else {
             nfc_skip_to_next_line(&p, fend);
             continue;
           }

@@ -39,4 +39,17 @@ static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset)
   data->lindex = data->rindex;
 }
 
+/** Portable signed 64-bit addition overflow check. */
+#if defined(__GNUC__) || defined(__clang__)
+  #define LIGHTER_ADD_OVERFLOW(a, b, res) __builtin_add_overflow(a, b, res)
+#else
+static inline int LIGHTER_ADD_OVERFLOW(int64_t a, int64_t b, int64_t* res) {
+  if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
+    return 1;
+  }
+  *res = a + b;
+  return 0;
+}
+#endif
+
 #endif /* LIGHTER_COMMON_H */

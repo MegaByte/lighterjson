@@ -93,74 +93,74 @@ typedef struct LighterMap {
  * On failure returns -1 and reports to stderr; caller must not call lighter_map_close.
  */
 static inline int lighter_map_open(LighterMap* m, const char* path, int read_only) {
-  #if LIGHTER_MEMMAP_WIN
-    wchar_t* wpath = lighter_make_long_path_w(path);
-    if (!wpath) {
-      fprintf(stderr, "Invalid path encoding or out of memory\n");
-      return -1;
-    }
-  
-    HANDLE h = CreateFileW(wpath, read_only ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE), FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    free(wpath);
-    if (h == INVALID_HANDLE_VALUE) {
-      fprintf(stderr, "Could not open %s\n", path);
-      return -1;
-    }
-    LARGE_INTEGER li;
-    if (!GetFileSizeEx(h, &li) || li.QuadPart <= 0 || (read_only && li.QuadPart > (LONGLONG)((size_t)-1))) {
-      if (!read_only) {
-        fprintf(stderr, "Could not get file size\n");
-      }
-      CloseHandle(h);
-      return -1;
-    }
-    m->size = (size_t)li.QuadPart;
-    m->hMap = CreateFileMappingA(h, NULL, read_only ? PAGE_READONLY : PAGE_READWRITE, 0, 0, NULL);
-    if (!m->hMap) {
-      if (!read_only) {
-        fprintf(stderr, "Could not map file\n");
-      }
-      CloseHandle(h);
-      return -1;
-    }
-    m->data = (uint8_t*)MapViewOfFile(m->hMap, read_only ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS, 0, 0, read_only ? m->size : 0);
-    if (!m->data) {
-      if (!read_only) {
-        fprintf(stderr, "Could not map view\n");
-      }
-      CloseHandle(m->hMap);
-      CloseHandle(h);
-      return -1;
-    }
-    m->hFile = read_only ? INVALID_HANDLE_VALUE : h;
-    if (read_only) {
-      CloseHandle(h);
-    }
-    return 0;
-  #else
-    m->fd = open(path, read_only ? O_RDONLY : O_RDWR);
-    if (m->fd < 0) {
-      fprintf(stderr, "Could not open %s: %s\n", path, strerror(errno));
-      return -1;
-    }
-    struct stat sb;
-    if (fstat(m->fd, &sb) < 0 || sb.st_size <= 0) {
+#if LIGHTER_MEMMAP_WIN
+  wchar_t* wpath = lighter_make_long_path_w(path);
+  if (!wpath) {
+    fprintf(stderr, "Invalid path encoding or out of memory\n");
+    return -1;
+  }
+
+  HANDLE h = CreateFileW(wpath, read_only ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE), FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  free(wpath);
+  if (h == INVALID_HANDLE_VALUE) {
+    fprintf(stderr, "Could not open %s\n", path);
+    return -1;
+  }
+  LARGE_INTEGER li;
+  if (!GetFileSizeEx(h, &li) || li.QuadPart <= 0 || (read_only && li.QuadPart > (LONGLONG)((size_t)-1))) {
+    if (!read_only) {
       fprintf(stderr, "Could not get file size\n");
-      close(m->fd);
-      m->fd = -1;
-      return -1;
     }
-    m->size = (size_t)sb.st_size;
-    m->data = (uint8_t*)mmap(NULL, m->size, read_only ? PROT_READ : (PROT_READ | PROT_WRITE), read_only ? MAP_PRIVATE : MAP_SHARED, m->fd, 0);
-    if (m->data == MAP_FAILED) {
+    CloseHandle(h);
+    return -1;
+  }
+  m->size = (size_t)li.QuadPart;
+  m->hMap = CreateFileMappingA(h, NULL, read_only ? PAGE_READONLY : PAGE_READWRITE, 0, 0, NULL);
+  if (!m->hMap) {
+    if (!read_only) {
       fprintf(stderr, "Could not map file\n");
-      close(m->fd);
-      m->fd = -1;
-      m->data = NULL;
-      return -1;
     }
-    return 0;
-  #endif
+    CloseHandle(h);
+    return -1;
+  }
+  m->data = (uint8_t*)MapViewOfFile(m->hMap, read_only ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS, 0, 0, read_only ? m->size : 0);
+  if (!m->data) {
+    if (!read_only) {
+      fprintf(stderr, "Could not map view\n");
+    }
+    CloseHandle(m->hMap);
+    CloseHandle(h);
+    return -1;
+  }
+  m->hFile = read_only ? INVALID_HANDLE_VALUE : h;
+  if (read_only) {
+    CloseHandle(h);
+  }
+  return 0;
+#else
+  m->fd = open(path, read_only ? O_RDONLY : O_RDWR);
+  if (m->fd < 0) {
+    fprintf(stderr, "Could not open %s: %s\n", path, strerror(errno));
+    return -1;
+  }
+  struct stat sb;
+  if (fstat(m->fd, &sb) < 0 || sb.st_size <= 0) {
+    fprintf(stderr, "Could not get file size\n");
+    close(m->fd);
+    m->fd = -1;
+    return -1;
+  }
+  m->size = (size_t)sb.st_size;
+  m->data = (uint8_t*)mmap(NULL, m->size, read_only ? PROT_READ : (PROT_READ | PROT_WRITE), read_only ? MAP_PRIVATE : MAP_SHARED, m->fd, 0);
+  if (m->data == MAP_FAILED) {
+    fprintf(stderr, "Could not map file\n");
+    close(m->fd);
+    m->fd = -1;
+    m->data = NULL;
+    return -1;
+  }
+  return 0;
+#endif
 }
 
 /**

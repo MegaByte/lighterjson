@@ -251,7 +251,6 @@ static inline void lighter_do_string_impl(LighterData* data, int disable_nfc, in
 }
 
 static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  uint8_t* start = data->rindex;
   ++(data->rindex);
   if (has_avx512) {
     lighter_do_string_impl(data, disable_nfc, 1, 0, 0, 0);

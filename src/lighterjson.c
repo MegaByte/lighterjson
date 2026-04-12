@@ -64,6 +64,10 @@ static int do_file(LighterContext* ctx, char filename[]);
 static int do_dir(LighterContext* ctx, PathBuffer* pb);
 
 static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  (void)has_avx512;
+  (void)has_avx2;
+  (void)has_neon;
+  (void)has_rvv;
 #if LIGHTER_PLATFORM_X86
   if (has_avx512) {
     __m512i spaces = _mm512_set1_epi8(' ');
@@ -201,16 +205,6 @@ void skip_whitespace_run(LighterData* data, int include_newline, LighterContext*
   else {
     run = skip_whitespace_impl(run, end, include_newline, 0, 0, 0, 0);
   }
-
-  if (include_newline) {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\n' || *run == '\r')) {
-      ++run;
-    }
-  } else {
-    while (run < end && (*run == ' ' || *run == '\t' || *run == '\r')) {
-      ++run;
-    }
-  }
   lighter_write_data(data, run - data->rindex);
 }
 
@@ -301,7 +295,7 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
         __m512i chunk = _mm512_loadu_si512((const void*)p);
         __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs) |
                          _mm512_cmpeq_epi8_mask(chunk, lfs) | _mm512_cmpeq_epi8_mask(chunk, quotes) | _mm512_cmpeq_epi8_mask(chunk, minus) |
-                         (_mm512_cmpge_epi8_mask(chunk, _mm512_set1_epi8('0')) & _mm512_cmple_epi8_mask(chunk, _mm512_set1_epi8('9')));
+                         _mm512_cmp_epu8_mask(_mm512_sub_epi8(chunk, _mm512_set1_epi8('0')), _mm512_set1_epi8(9), _MM_CMPINT_LE);
         if (mask != 0) {
   #if defined(_MSC_VER)
           unsigned long offset;
@@ -329,7 +323,7 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
                             _mm256_or_si256(_mm256_cmpeq_epi8(chunk, crs),
                                             _mm256_or_si256(_mm256_cmpeq_epi8(chunk, lfs),
                                                             _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quotes), _mm256_cmpeq_epi8(chunk, minus))))));
-        __m256i digits = _mm256_and_si256(_mm256_cmpgt_epi8(chunk, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), chunk));
+        __m256i digits = _mm256_cmpeq_epi8(_mm256_subs_epu8(_mm256_sub_epi8(chunk, _mm256_set1_epi8('0')), _mm256_set1_epi8(9)), _mm256_set1_epi8(0));
         m = _mm256_or_si256(m, digits);
         uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
         if (mask != 0) {
@@ -491,7 +485,7 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
         }
         break;
       case ',':
-        if (comma_ok && parent_types.current != None) {
+        if (comma_ok && (int)parent_types.current != None) {
           ++(data->rindex);
           if (parent_types.current == Object) {
             do_object(data, ctx, line_start);
@@ -703,10 +697,6 @@ static int do_file(LighterContext* ctx, char filename[]) {
   data.data_start = data.rindex = data.windex = data.lindex = map.data;
   data.data_end = map.data + map.size;
 
-  ctx->has_avx512 = lighter_cpu_supports_avx512bw();
-  ctx->has_avx2 = lighter_cpu_supports_avx2();
-  ctx->has_neon = lighter_cpu_supports_neon();
-  ctx->has_rvv = lighter_cpu_supports_rvv();
   do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0);
   if (ctx->newlines) {
     while (data.rindex < data.data_end) {
@@ -863,6 +853,11 @@ int main(int argc, char* argv[]) {
     }
     ++optind_val;
   }
+
+  ctx.has_avx512 = lighter_cpu_supports_avx512bw();
+  ctx.has_avx2 = lighter_cpu_supports_avx2();
+  ctx.has_neon = lighter_cpu_supports_neon();
+  ctx.has_rvv = lighter_cpu_supports_rvv();
 
   if (argc - optind_val != 1) {
     usage(argv[0], EXIT_FAILURE);

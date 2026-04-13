@@ -189,6 +189,55 @@ static inline int lighter_map_truncate(LighterMap* m, size_t len) {
 }
 
 /**
+ * Expand the file and mapping. On Unix, *old_data_out is set to the previous data pointer,
+ * which must be manually unmapped via lighter_map_unmap(old_data, old_size).
+ * On Windows, the old mapping is always closed and *old_data_out is set to NULL.
+ */
+static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** old_data_out, size_t* old_size_out) {
+  *old_size_out = m->size;
+#if LIGHTER_MEMMAP_WIN
+  *old_data_out = NULL;
+  UnmapViewOfFile(m->data);
+  CloseHandle(m->hMap);
+  LARGE_INTEGER li;
+  li.QuadPart = (LONGLONG)new_size;
+  if (!SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN) || !SetEndOfFile(m->hFile)) {
+    return -1;
+  }
+  m->size = new_size;
+  m->hMap = CreateFileMappingA(m->hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+  if (!m->hMap) {
+    return -1;
+  }
+  m->data = (uint8_t*)MapViewOfFile(m->hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  return m->data ? 0 : -1;
+#else
+  *old_data_out = m->data;
+  if (ftruncate(m->fd, (off_t)new_size) < 0) {
+    return -1;
+  }
+  m->data = (uint8_t*)mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, m->fd, 0);
+  if (m->data == MAP_FAILED) {
+    m->data = *old_data_out;
+    return -1;
+  }
+  m->size = new_size;
+  return 0;
+#endif
+}
+
+/**
+ * Manually unmap a data region. Use for cleaning up after lighter_map_expand on Unix.
+ */
+static inline void lighter_map_unmap(uint8_t* data, size_t size) {
+#if LIGHTER_MEMMAP_WIN
+  UnmapViewOfFile(data);
+#else
+  munmap(data, size);
+#endif
+}
+
+/**
  * Unmap and close. Only call after a successful lighter_map_open.
  */
 static inline void lighter_map_close(LighterMap* m) {

@@ -20,7 +20,11 @@ typedef struct Bitfield {
   size_t current;
 } Bitfield;
 
-typedef enum Container { None = -1, Array, Object } Container;
+typedef enum Container {
+  None = -1,
+  Array,
+  Object
+} Container;
 
 static inline void init_bits(Bitfield* bitfield) {
   bitfield->size = 1; /* number of uint64_t elements */

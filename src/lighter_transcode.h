@@ -1,8 +1,7 @@
 /**
- * @file   lighter_transcode.h
- * @brief  Lightweight, multi-encoding transcoding (UTF-16/32 <-> UTF-8).
+ * @file      lighter_transcode.h
+ * @brief     Encoding detection and transcoding for LighterJSON
  */
-
 #ifndef LIGHTER_TRANSCODE_H
 #define LIGHTER_TRANSCODE_H
 
@@ -10,237 +9,208 @@
 #include <stdint.h>
 #include <string.h>
 
-typedef enum {
+typedef enum LighterEncoding {
   LIGHTER_ENC_UTF8,
-  LIGHTER_ENC_UTF8_BOM,
   LIGHTER_ENC_UTF16LE,
   LIGHTER_ENC_UTF16BE,
   LIGHTER_ENC_UTF32LE,
-  LIGHTER_ENC_UTF32BE,
-  LIGHTER_ENC_UNKNOWN
+  LIGHTER_ENC_UTF32BE
 } LighterEncoding;
 
-static inline LighterEncoding lighter_detect_encoding(const uint8_t* data, size_t size) {
+/** Detect encoding based on BOM or null byte patterns. */
+static inline LighterEncoding lighter_detect_encoding(const uint8_t* buf, size_t size) {
   if (size >= 4) {
-    if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF) {
+    if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0xFE && buf[3] == 0xFF) {
       return LIGHTER_ENC_UTF32BE;
     }
-    if (data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00) {
+    if (buf[0] == 0xFF && buf[1] == 0xFE && buf[2] == 0x00 && buf[3] == 0x00) {
+      return LIGHTER_ENC_UTF32LE;
+    }
+    if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00) {
+      return LIGHTER_ENC_UTF32BE;
+    }
+    if (buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x00) {
       return LIGHTER_ENC_UTF32LE;
     }
   }
   if (size >= 3) {
-    if (data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
-      return LIGHTER_ENC_UTF8_BOM;
+    if (buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) {
+      return LIGHTER_ENC_UTF8;
     }
   }
   if (size >= 2) {
-    if (data[0] == 0xFE && data[1] == 0xFF) {
+    if (buf[0] == 0xFE && buf[1] == 0xFF) {
       return LIGHTER_ENC_UTF16BE;
     }
-    if (data[0] == 0xFF && data[1] == 0xFE) {
+    if (buf[0] == 0xFF && buf[1] == 0xFE) {
+      return LIGHTER_ENC_UTF16LE;
+    }
+    if (buf[0] == 0x00) {
+      return LIGHTER_ENC_UTF16BE;
+    }
+    if (buf[1] == 0x00) {
       return LIGHTER_ENC_UTF16LE;
     }
   }
   return LIGHTER_ENC_UTF8;
 }
 
-static inline int lighter_encode_utf8_single(uint32_t cp, uint8_t* out) {
-  if (cp <= 0x7F) {
-    if (out) {
-      out[0] = (uint8_t)cp;
+/** Return the size of the BOM for the given encoding and buffer. */
+static inline size_t lighter_encoding_bom_size(LighterEncoding enc, const uint8_t* buf, size_t size) {
+  if (enc == LIGHTER_ENC_UTF32LE || enc == LIGHTER_ENC_UTF32BE) {
+    if (size >= 4 &&
+        ((buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0xFE && buf[3] == 0xFF) || (buf[0] == 0xFF && buf[1] == 0xFE && buf[2] == 0x00 && buf[3] == 0x00))) {
+      return 4;
     }
-    return 1;
-  } else if (cp <= 0x7FF) {
-    if (out) {
-      out[0] = (uint8_t)(0xC0 | (cp >> 6));
-      out[1] = (uint8_t)(0x80 | (cp & 0x3F));
+  } else if (enc == LIGHTER_ENC_UTF16LE || enc == LIGHTER_ENC_UTF16BE) {
+    if (size >= 2 && ((buf[0] == 0xFE && buf[1] == 0xFF) || (buf[0] == 0xFF && buf[1] == 0xFE))) {
+      return 2;
     }
-    return 2;
-  } else if (cp <= 0xFFFF) {
-    if (out) {
-      out[0] = (uint8_t)(0xE0 | (cp >> 12));
-      out[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-      out[2] = (uint8_t)(0x80 | (cp & 0x3F));
+  } else if (enc == LIGHTER_ENC_UTF8) {
+    if (size >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) {
+      return 3;
     }
-    return 3;
-  } else if (cp <= 0x10FFFF) {
-    if (out) {
-      out[0] = (uint8_t)(0xF0 | (cp >> 18));
-      out[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
-      out[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-      out[3] = (uint8_t)(0x80 | (cp & 0x3F));
-    }
-    return 4;
   }
-  /* Invalid code point -> replacement character U+FFFD */
-  if (out) {
-    out[0] = 0xEF;
-    out[1] = 0xBF;
-    out[2] = 0xBD;
-  }
-  return 3;
+  return 0;
 }
 
-static inline int lighter_decode_utf8_single(const uint8_t* src, size_t size, size_t* r, uint32_t* cp) {
-  if (*r >= size) {
-    return -1;
-  }
-  uint8_t c = src[(*r)++];
-  if (c <= 0x7F) {
-    *cp = c;
-    return 1;
-  } else if ((c & 0xE0) == 0xC0 && *r < size) {
-    *cp = ((uint32_t)(c & 0x1F) << 6) | (src[(*r)++] & 0x3F);
-    return 2;
-  } else if ((c & 0xF0) == 0xE0 && *r + 1 < size) {
-    *cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(src[(*r)++] & 0x3F) << 6) | (src[(*r)++] & 0x3F);
-    return 3;
-  } else if ((c & 0xF8) == 0xF0 && *r + 2 < size) {
-    *cp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(src[(*r)++] & 0x3F) << 12) | ((uint32_t)(src[(*r)++] & 0x3F) << 6) | (src[(*r)++] & 0x3F);
-    return 4;
-  }
-  return -1;
-}
+/** Transcode UTF-16/32 to UTF-8. src and dst can overlap if dst < src. */
+static inline void lighter_transcode_to_utf8(const uint8_t* src, size_t src_size, uint8_t* dst, LighterEncoding enc, size_t* out_size) {
+  uint8_t* d = dst;
+  const uint8_t* s = src;
+  const uint8_t* end = src + src_size;
 
-static inline void lighter_encode_utf16_single(uint32_t cp, LighterEncoding enc, uint8_t* dst, size_t* w) {
-  if (cp > 0x10FFFF) {
-    cp = 0xFFFD;
-  }
-  if (cp <= 0xFFFF) {
-    uint16_t u = (uint16_t)cp;
-    if (enc == LIGHTER_ENC_UTF16LE) {
-      dst[(*w)++] = u & 0xFF;
-      dst[(*w)++] = (u >> 8) & 0xFF;
-    } else {
-      dst[(*w)++] = (u >> 8) & 0xFF;
-      dst[(*w)++] = u & 0xFF;
+  if (enc == LIGHTER_ENC_UTF32LE || enc == LIGHTER_ENC_UTF32BE) {
+    while (s + 4 <= end) {
+      uint32_t cp;
+      if (enc == LIGHTER_ENC_UTF32LE) {
+        cp = s[0] | (s[1] << 8) | (s[2] << 16) | (s[3] << 24);
+      } else {
+        cp = (s[0] << 24) | (s[1] << 16) | (s[2] << 8) | s[3];
+      }
+      s += 4;
+      if (cp <= 0x7F) {
+        *d++ = (uint8_t)cp;
+      } else if (cp <= 0x7FF) {
+        *d++ = 0xC0 | (cp >> 6);
+        *d++ = 0x80 | (cp & 0x3F);
+      } else if (cp <= 0xFFFF) {
+        *d++ = 0xE0 | (cp >> 12);
+        *d++ = 0x80 | ((cp >> 6) & 0x3F);
+        *d++ = 0x80 | (cp & 0x3F);
+      } else if (cp <= 0x10FFFF) {
+        *d++ = 0xF0 | (cp >> 18);
+        *d++ = 0x80 | ((cp >> 12) & 0x3F);
+        *d++ = 0x80 | ((cp >> 6) & 0x3F);
+        *d++ = 0x80 | (cp & 0x3F);
+      }
     }
-  } else {
-    cp -= 0x10000;
-    uint16_t hi = (uint16_t)(0xD800 + (cp >> 10));
-    uint16_t lo = (uint16_t)(0xDC00 + (cp & 0x3FF));
-    if (enc == LIGHTER_ENC_UTF16LE) {
-      dst[(*w)++] = hi & 0xFF;
-      dst[(*w)++] = (hi >> 8) & 0xFF;
-      dst[(*w)++] = lo & 0xFF;
-      dst[(*w)++] = (lo >> 8) & 0xFF;
-    } else {
-      dst[(*w)++] = (hi >> 8) & 0xFF;
-      dst[(*w)++] = hi & 0xFF;
-      dst[(*w)++] = (lo >> 8) & 0xFF;
-      dst[(*w)++] = lo & 0xFF;
-    }
-  }
-}
-
-/**
- * Forward transcoding: any to UTF8.
- * If data is already UTF8 with BOM, it skips the BOM.
- */
-static inline int lighter_transcode_to_utf8(const uint8_t* src, size_t size, uint8_t* dst, LighterEncoding enc, size_t* out_size) {
-  if (enc == LIGHTER_ENC_UTF8) {
-    if (src != dst) {
-      memmove(dst, src, size);
-    }
-    *out_size = size;
-    return 0;
-  }
-  if (enc == LIGHTER_ENC_UTF8_BOM) {
-    memmove(dst, src + 3, size - 3);
-    *out_size = size - 3;
-    return 0;
-  }
-
-  size_t w = 0;
-  size_t r;
-  if (enc == LIGHTER_ENC_UTF16LE || enc == LIGHTER_ENC_UTF16BE) {
-    r = 2;  // Skip BOM
-    while (r + 1 < size) {
-      uint32_t u = (enc == LIGHTER_ENC_UTF16LE) ? (src[r] | (uint32_t)src[r + 1] << 8) : ((uint32_t)src[r] << 8 | src[r + 1]);
-      r += 2;
-      if (u >= 0xD800 && u <= 0xDBFF && r + 1 < size) {
-        uint32_t low = (enc == LIGHTER_ENC_UTF16LE) ? (src[r] | (uint32_t)src[r + 1] << 8) : ((uint32_t)src[r] << 8 | src[r + 1]);
+  } else if (enc == LIGHTER_ENC_UTF16LE || enc == LIGHTER_ENC_UTF16BE) {
+    while (s + 2 <= end) {
+      uint32_t cp;
+      if (enc == LIGHTER_ENC_UTF16LE) {
+        cp = s[0] | (s[1] << 8);
+      } else {
+        cp = (s[0] << 8) | s[1];
+      }
+      s += 2;
+      if (cp >= 0xD800 && cp <= 0xDBFF && s + 2 <= end) {
+        uint32_t low;
+        if (enc == LIGHTER_ENC_UTF16LE) {
+          low = s[0] | (s[1] << 8);
+        } else {
+          low = (s[0] << 8) | s[1];
+        }
         if (low >= 0xDC00 && low <= 0xDFFF) {
-          u = 0x10000 + ((u - 0xD800) << 10) + (low - 0xDC00);
-          r += 2;
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+          s += 2;
         }
       }
-      w += lighter_encode_utf8_single(u, dst + w);
-    }
-  } else if (enc == LIGHTER_ENC_UTF32LE || enc == LIGHTER_ENC_UTF32BE) {
-    r = 4;  // Skip BOM
-    while (r + 3 < size) {
-      uint32_t u = (enc == LIGHTER_ENC_UTF32LE) ? (src[r] | (uint32_t)src[r + 1] << 8 | (uint32_t)src[r + 2] << 16 | (uint32_t)src[r + 3] << 24)
-                                                : ((uint32_t)src[r] << 24 | (uint32_t)src[r + 1] << 16 | (uint32_t)src[r + 2] << 8 | src[r + 3]);
-      r += 4;
-      w += lighter_encode_utf8_single(u, dst + w);
-    }
-  }
-  *out_size = w;
-  return 0;
-}
-
-/**
- * Reverse transcoding: UTF8 to original encoding (currently only UTF16 supported for fallback).
- */
-static inline int lighter_transcode_from_utf8(const uint8_t* src, size_t src_size, LighterEncoding target_enc, uint8_t* dst, size_t* out_size) {
-  if (target_enc == LIGHTER_ENC_UTF8 || target_enc == LIGHTER_ENC_UTF8_BOM) {
-    size_t bom_off = (target_enc == LIGHTER_ENC_UTF8_BOM) ? 3 : 0;
-    if (bom_off) {
-      dst[0] = 0xEF;
-      dst[1] = 0xBB;
-      dst[2] = 0xBF;
-    }
-    memcpy(dst + bom_off, src, src_size);
-    *out_size = src_size + bom_off;
-    return 0;
-  }
-
-  size_t r = 0;
-  size_t w = 0;
-  /* Add BOM */
-  if (target_enc == LIGHTER_ENC_UTF16LE) {
-    dst[w++] = 0xFF;
-    dst[w++] = 0xFE;
-  } else if (target_enc == LIGHTER_ENC_UTF16BE) {
-    dst[w++] = 0xFE;
-    dst[w++] = 0xFF;
-  } else if (target_enc == LIGHTER_ENC_UTF32LE) {
-    dst[w++] = 0xFF;
-    dst[w++] = 0xFE;
-    dst[w++] = 0x00;
-    dst[w++] = 0x00;
-  } else if (target_enc == LIGHTER_ENC_UTF32BE) {
-    dst[w++] = 0x00;
-    dst[w++] = 0x00;
-    dst[w++] = 0xFE;
-    dst[w++] = 0xFF;
-  }
-
-  while (r < src_size) {
-    uint32_t cp;
-    if (lighter_decode_utf8_single(src, src_size, &r, &cp) < 0) {
-      break;
-    }
-    if (target_enc == LIGHTER_ENC_UTF16LE || target_enc == LIGHTER_ENC_UTF16BE) {
-      lighter_encode_utf16_single(cp, target_enc, dst, &w);
-    } else if (target_enc == LIGHTER_ENC_UTF32LE || target_enc == LIGHTER_ENC_UTF32BE) {
-      if (target_enc == LIGHTER_ENC_UTF32LE) {
-        dst[w++] = cp & 0xFF;
-        dst[w++] = (cp >> 8) & 0xFF;
-        dst[w++] = (cp >> 16) & 0xFF;
-        dst[w++] = (cp >> 24) & 0xFF;
-      } else {
-        dst[w++] = (cp >> 24) & 0xFF;
-        dst[w++] = (cp >> 16) & 0xFF;
-        dst[w++] = (cp >> 8) & 0xFF;
-        dst[w++] = cp & 0xFF;
+      if (cp <= 0x7F) {
+        *d++ = (uint8_t)cp;
+      } else if (cp <= 0x7FF) {
+        *d++ = 0xC0 | (cp >> 6);
+        *d++ = 0x80 | (cp & 0x3F);
+      } else if (cp <= 0xFFFF) {
+        *d++ = 0xE0 | (cp >> 12);
+        *d++ = 0x80 | ((cp >> 6) & 0x3F);
+        *d++ = 0x80 | (cp & 0x3F);
+      } else if (cp <= 0x10FFFF) {
+        *d++ = 0xF0 | (cp >> 18);
+        *d++ = 0x80 | ((cp >> 12) & 0x3F);
+        *d++ = 0x80 | ((cp >> 6) & 0x3F);
+        *d++ = 0x80 | (cp & 0x3F);
       }
     }
   }
-  *out_size = w;
-  return 0;
+  *out_size = (size_t)(d - dst);
 }
 
-#endif /* LIGHTER_TRANSCODE_H */
+/** Transcode UTF-8 BACK to original encoding if possible. */
+static inline void lighter_transcode_from_utf8(const uint8_t* src, size_t src_size, LighterEncoding enc, uint8_t* dst, size_t* out_size) {
+  if (enc == LIGHTER_ENC_UTF8) {
+    memcpy(dst, src, src_size);
+    *out_size = src_size;
+    return;
+  }
+  uint8_t* d = dst;
+  const uint8_t* s = src;
+  const uint8_t* end = src + src_size;
+  while (s < end) {
+    uint32_t cp;
+    if (s[0] <= 0x7F) {
+      cp = *s++;
+    } else if ((s[0] & 0xE0) == 0xC0 && s + 1 < end) {
+      cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+      s += 2;
+    } else if ((s[0] & 0xF0) == 0xE0 && s + 2 < end) {
+      cp = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+      s += 3;
+    } else if ((s[0] & 0xF8) == 0xF0 && s + 3 < end) {
+      cp = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+      s += 4;
+    } else {
+      s++;
+      continue;
+    }
+
+    if (enc == LIGHTER_ENC_UTF32LE) {
+      *d++ = cp & 0xFF;
+      *d++ = (cp >> 8) & 0xFF;
+      *d++ = (cp >> 16) & 0xFF;
+      *d++ = (cp >> 24) & 0xFF;
+    } else if (enc == LIGHTER_ENC_UTF32BE) {
+      *d++ = (cp >> 24) & 0xFF;
+      *d++ = (cp >> 16) & 0xFF;
+      *d++ = (cp >> 8) & 0xFF;
+      *d++ = cp & 0xFF;
+    } else if (enc == LIGHTER_ENC_UTF16LE || enc == LIGHTER_ENC_UTF16BE) {
+      if (cp <= 0xFFFF) {
+        if (enc == LIGHTER_ENC_UTF16LE) {
+          *d++ = cp & 0xFF;
+          *d++ = (cp >> 8) & 0xFF;
+        } else {
+          *d++ = (cp >> 8) & 0xFF;
+          *d++ = cp & 0xFF;
+        }
+      } else {
+        uint32_t h = 0xD800 + ((cp - 0x10000) >> 10);
+        uint32_t l = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+        if (enc == LIGHTER_ENC_UTF16LE) {
+          *d++ = h & 0xFF;
+          *d++ = (h >> 8) & 0xFF;
+          *d++ = l & 0xFF;
+          *d++ = (l >> 8) & 0xFF;
+        } else {
+          *d++ = (h >> 8) & 0xFF;
+          *d++ = h & 0xFF;
+          *d++ = (l >> 8) & 0xFF;
+          *d++ = l & 0xFF;
+        }
+      }
+    }
+  }
+  *out_size = (size_t)(d - dst);
+}
+
+#endif

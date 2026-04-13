@@ -65,7 +65,7 @@ echo "JSON test suite (lighter: $LIGHTER)"
 echo ""
 
 # Single-document tests
-for f in empty_object empty_array literals numbers strings nested whitespace mixed unicode single_value array_of_objects deep_nesting escapes number_edges large_array unicode_keys complex scientific zero_variants single_char_keys escapes_full float_formats float_formats_complex; do
+for f in empty_object empty_array literals numbers strings nested whitespace mixed unicode single_value array_of_objects deep_nesting escapes number_edges large_array unicode_keys complex scientific zero_variants single_char_keys escapes_full float_formats float_formats_complex huge_exponents; do
   run_test "$f" "" "$TESTDATA/${f}.json" || true
 done
 

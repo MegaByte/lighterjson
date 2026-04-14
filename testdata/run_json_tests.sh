@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
-# Run lighter on testdata JSON files; verify output is valid JSON and
+# Run lighterjson on testdata JSON files; verify output is valid JSON and
 # (when Node and tools/comparejson.js exist) semantically equivalent to input.
-# Usage: run_json_tests.sh [path/to/lighter]
+# Usage: run_json_tests.sh [path/to/lighterjson]
 # Default: ./lighterjson (run from repo root)
 
 set -e
@@ -61,7 +61,7 @@ run_test() {
   return 0
 }
 
-echo "JSON test suite (lighter: $LIGHTER)"
+echo "JSON test suite (lighterjson: $LIGHTER)"
 echo ""
 
 # Single-document tests

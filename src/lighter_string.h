@@ -379,20 +379,27 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
 #endif
 
   while (data->rindex < data->data_end) {
+    /* 8-byte SWAR scan: build a combined mask where each matching byte has bit 0x80 set,
+     * then CTZ to jump directly to the first '"' or '\\'. Detects non-ASCII bytes
+     * in-flight via the high-bit mask so we don't need a second scan. */
     while (data->rindex + 8 <= data->data_end) {
       uint64_t v;
       memcpy(&v, data->rindex, 8);
       if (!saw_non_ascii && (v & 0x8080808080808080ULL)) {
         saw_non_ascii = 1;
       }
-      if (lighter_has_byte(v, '"') || lighter_has_byte(v, '\\')) {
+      uint64_t q = v ^ 0x2222222222222222ULL;
+      uint64_t e = v ^ 0x5C5C5C5C5C5C5C5CULL;
+      q = (q - 0x0101010101010101ULL) & ~q & 0x8080808080808080ULL;
+      e = (e - 0x0101010101010101ULL) & ~e & 0x8080808080808080ULL;
+      uint64_t m = q | e;
+      if (m) {
+        data->rindex += (size_t)(__builtin_ctzll(m) >> 3);
         break;
       }
       data->rindex += 8;
     }
-    /* Byte scan for the trailing (< 8 bytes) region or to find the first '"'/'\\' in
-     * the chunk flagged by the SWAR above. Must stop at '"' or '\\' — they're both
-     * ASCII so we can't just skip all ASCII bytes. */
+    /* Byte-by-byte for the final <8 tail. */
     while (data->rindex < data->data_end) {
       uint8_t c = *data->rindex;
       if (c == '"' || c == '\\') {

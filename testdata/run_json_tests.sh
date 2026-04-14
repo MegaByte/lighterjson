@@ -2,10 +2,10 @@
 # Run lighter on testdata JSON files; verify output is valid JSON and
 # (when Node and tools/comparejson.js exist) semantically equivalent to input.
 # Usage: run_json_tests.sh [path/to/lighter]
-# Default: ./lighter (run from repo root)
+# Default: ./lighterjson (run from repo root)
 
 set -e
-LIGHTER="${1:-./lighter}"
+LIGHTER="${1:-./lighterjson}"
 TESTDATA="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$TESTDATA/.." && pwd)"
 OUT_DIR="$TESTDATA/.out"

@@ -194,23 +194,38 @@ static inline int lighter_map_truncate(LighterMap* m, size_t len) {
  * On Windows, the old mapping is always closed and *old_data_out is set to NULL.
  */
 static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** old_data_out, size_t* old_size_out) {
-  *old_size_out = m->size;
+  size_t old_size = m->size;
+  *old_size_out = old_size;
 #if LIGHTER_MEMMAP_WIN
   *old_data_out = NULL;
-  UnmapViewOfFile(m->data);
-  CloseHandle(m->hMap);
   LARGE_INTEGER li;
   li.QuadPart = (LONGLONG)new_size;
   if (!SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN) || !SetEndOfFile(m->hFile)) {
     return -1;
   }
-  m->size = new_size;
-  m->hMap = CreateFileMappingA(m->hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
-  if (!m->hMap) {
+  HANDLE old_hMap = m->hMap;
+  uint8_t* old_data = m->data;
+  HANDLE new_hMap = CreateFileMappingA(m->hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+  if (!new_hMap) {
+    li.QuadPart = (LONGLONG)old_size;
+    SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN);
+    SetEndOfFile(m->hFile);
     return -1;
   }
-  m->data = (uint8_t*)MapViewOfFile(m->hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-  return m->data ? 0 : -1;
+  uint8_t* new_data = (uint8_t*)MapViewOfFile(new_hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  if (!new_data) {
+    CloseHandle(new_hMap);
+    li.QuadPart = (LONGLONG)old_size;
+    SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN);
+    SetEndOfFile(m->hFile);
+    return -1;
+  }
+  UnmapViewOfFile(old_data);
+  CloseHandle(old_hMap);
+  m->hMap = new_hMap;
+  m->data = new_data;
+  m->size = new_size;
+  return 0;
 #else
   *old_data_out = m->data;
   if (ftruncate(m->fd, (off_t)new_size) < 0) {
@@ -218,6 +233,7 @@ static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** o
   }
   m->data = (uint8_t*)mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, m->fd, 0);
   if (m->data == MAP_FAILED) {
+    (void)ftruncate(m->fd, (off_t)old_size);
     m->data = *old_data_out;
     return -1;
   }

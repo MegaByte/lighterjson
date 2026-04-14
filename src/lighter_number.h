@@ -175,12 +175,38 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
   int exponent_saturated = 0;
   uint8_t* i;
   uint8_t* p_scan = data->rindex;
+#if LIGHTER_PLATFORM_X86
+  const __m256i avx2_zero = _mm256_set1_epi8('0');
+  const __m256i avx2_dot = _mm256_set1_epi8('.');
+  const __m256i avx2_e = _mm256_set1_epi8('e');
+  const __m256i avx2_E = _mm256_set1_epi8('E');
+#elif LIGHTER_PLATFORM_ARM64
+  const uint8x16_t neon_zero = vdupq_n_u8('0');
+  const uint8x16_t neon_dot = vdupq_n_u8('.');
+  const uint8x16_t neon_e = vdupq_n_u8('e');
+  const uint8x16_t neon_E = vdupq_n_u8('E');
+#endif
 
   if (*p_scan == '-') {
     negative = 1;
     ++p_scan;
   }
   data->rindex = p_scan; /* update for later use in loops if needed */
+
+  /* Fast path for common short integers: already canonical form, no reformatting.
+   * Requires: first digit is '1'..'9', subsequent bytes up to a non-digit are all
+   * digits (no '.', no 'e'/'E'), and precision is UNLIMITED so no rounding occurs.
+   * Big win on integer-heavy workloads; small overhead on float-heavy ones. */
+  if (LIGHTER_LIKELY(precision == LIGHTER_PRECISION_UNLIMITED && p_scan < data->data_end && (unsigned)(*p_scan - '1') < 9u)) {
+    uint8_t* q = p_scan + 1;
+    while (q < data->data_end && (unsigned)(*q - '0') <= 9u) {
+      ++q;
+    }
+    if (LIGHTER_LIKELY(q >= data->data_end || (*q != '.' && *q != 'e' && *q != 'E'))) {
+      data->rindex = q;
+      return;
+    }
+  }
 
   /* Loop 1: Find decimal, exponent marker, and significant digit bounds */
   for (i = p_scan; i < data->data_end && !exponent && !number_end;) {
@@ -189,8 +215,8 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     if (has_avx2 && i + 32 <= data->data_end) {
       __m256i chunk = _mm256_loadu_si256((const __m256i*)i);
       __m256i m_digit = lighter_simd_is_digit_avx2(chunk);
-      __m256i m_dot = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('.'));
-      __m256i m_exp = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('e')), _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('E')));
+      __m256i m_dot = _mm256_cmpeq_epi8(chunk, avx2_dot);
+      __m256i m_exp = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, avx2_e), _mm256_cmpeq_epi8(chunk, avx2_E));
       uint32_t mask_delimit = lighter_simd_mask_avx2(_mm256_or_si256(m_dot, m_exp));
       uint32_t mask_invalid = ~lighter_simd_mask_avx2(m_digit) & 0xFFFFFFFF;
 
@@ -207,7 +233,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
 
         /* Process up to first_action for non-zero bounds */
         {
-          __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
+          __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, avx2_zero), m_digit);
           uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
           if (mask_nonzero) {
             uint32_t bits = mask_nonzero & (uint32_t)((1ULL << first_action) - 1);
@@ -224,7 +250,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       } else {
         /* Fast skip: All are digits, update bounds */
         {
-          __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
+          __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, avx2_zero), m_digit);
           uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
           if (mask_nonzero) {
             if (LIGHTER_LIKELY(!non_zero_start)) {
@@ -241,8 +267,8 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     if (has_neon && i + 16 <= data->data_end) {
       uint8x16_t chunk = vld1q_u8(i);
       uint8x16_t m_digit = lighter_simd_is_digit_neon(chunk);
-      uint8x16_t m_dot = vceqq_u8(chunk, vdupq_n_u8('.'));
-      uint8x16_t m_exp = vorrq_u8(vceqq_u8(chunk, vdupq_n_u8('e')), vceqq_u8(chunk, vdupq_n_u8('E')));
+      uint8x16_t m_dot = vceqq_u8(chunk, neon_dot);
+      uint8x16_t m_exp = vorrq_u8(vceqq_u8(chunk, neon_e), vceqq_u8(chunk, neon_E));
       uint8x16_t m_delimit = vorrq_u8(m_dot, m_exp);
       uint8x16_t m_invalid = vmvnq_u8(m_digit);
 
@@ -254,7 +280,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       } else {
         /* Fast skip: update bounds */
         {
-          uint8x16_t m_nonzero = vbicq_u8(m_digit, vceqq_u8(chunk, vdupq_n_u8('0')));
+          uint8x16_t m_nonzero = vbicq_u8(m_digit, vceqq_u8(chunk, neon_zero));
           uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 0);
           uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 1);
           if (LIGHTER_LIKELY(!non_zero_start)) {
@@ -501,7 +527,10 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     min_exponent = exponent_value;
   } else {
     int64_t delta_max = (int64_t)(decimal ? decimal > non_zero_start ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_start;
-    int64_t delta_min = (int64_t)(decimal ? decimal > non_zero_finish ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_finish;
+    int64_t delta_min = (int64_t)(decimal    ? decimal > non_zero_finish ? decimal - 1 : decimal
+                                  : exponent ? exponent - 1
+                                             : number_end) -
+                        (int64_t)non_zero_finish;
     if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_max, &max_exponent))) {
       is_huge = 1;
     }

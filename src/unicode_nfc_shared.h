@@ -39,7 +39,12 @@ typedef enum {
   NFC_QC_NO = 2,
 } NfcQc;
 
-#define NFC_SEG_MAX 128
+/* Usual textual behavior: NFC-sensitive runs are typically short (base char + a
+ * few combining marks). Keep the common path stack-only and fall back to heap
+ * only when a segment is unusually long. */
+#define NFC_SEG_STACK_MAX 64
+#define NFC_DECOMP_STACK_MAX 128
+#define NFC_SEG_MAX NFC_SEG_STACK_MAX
 
 #define HANGUL_SBASE 0xAC00u
 #define HANGUL_LBASE 0x1100u

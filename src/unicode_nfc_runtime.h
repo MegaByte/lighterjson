@@ -137,6 +137,25 @@ static inline uint8_t nfc_get_qc(const NfcData* d, uint32_t cp) {
   return (d->stage2_qc_chk[off] == blk) ? d->stage2_qc_val[off] : NFC_QC_YES;
 }
 
+static inline int nfc_build_decomp_idx(NfcData* d) {
+  if (d->decomp_idx) {
+    return 1;
+  }
+  d->decomp_idx = (uint32_t*)calloc(NFC_MAX_CP, sizeof(uint32_t));
+  if (!d->decomp_idx) {
+    return 0;
+  }
+  for (size_t i = 0; i < d->decomp_sparse_count; ++i) {
+    uint32_t cp = nfc_decomp_sparse_cp(d, i);
+    uint32_t idx = nfc_decomp_sparse_idx(d, i);
+    d->decomp_idx[cp] = idx;
+  }
+  free((void*)d->decomp_sparse);
+  d->decomp_sparse = NULL;
+  d->decomp_sparse_count = 0;
+  return 1;
+}
+
 /* Canonical decomposition of one code point. Returns length (0 = none). */
 static inline int nfc_decompose_one(const NfcData* d, uint32_t cp, uint32_t* out) {
   /* Hangul syllable decomposition */
@@ -253,7 +272,7 @@ static uint32_t nfc_compose_pair(const NfcData* d, uint32_t starter, uint32_t co
 
 /* ── Recursive full canonical decomposition ────────────────────────── */
 
-static int nfc_full_decompose(const NfcData* d, uint32_t cp, uint32_t* buf, int max) {
+static inline int nfc_full_decompose(const NfcData* d, uint32_t cp, uint32_t* buf, int max) {
   uint32_t parts[NFC_DECOMP_MAX];
   int n = nfc_decompose_one(d, cp, parts);
   if (!n) {
@@ -268,6 +287,41 @@ static int nfc_full_decompose(const NfcData* d, uint32_t cp, uint32_t* buf, int 
     total += nfc_full_decompose(d, parts[i], buf + total, max - total);
   }
   return total;
+}
+
+static int nfc_full_decompose_append(const NfcData* d, uint32_t cp, uint32_t** buf, size_t* len, size_t* cap, uint32_t* stack_buf, size_t stack_cap) {
+  uint32_t parts[NFC_DECOMP_MAX];
+  int n = nfc_decompose_one(d, cp, parts);
+  if (!n) {
+    if (*len == *cap) {
+      size_t new_cap = (*cap == 0) ? stack_cap : (*cap * 2u);
+      if (new_cap < stack_cap) {
+        new_cap = stack_cap;
+      }
+      uint32_t* new_buf = NULL;
+      if (*buf == stack_buf) {
+        new_buf = (uint32_t*)malloc(new_cap * sizeof(uint32_t));
+        if (new_buf && *len) {
+          memcpy(new_buf, stack_buf, (*len) * sizeof(uint32_t));
+        }
+      } else {
+        new_buf = (uint32_t*)realloc(*buf, new_cap * sizeof(uint32_t));
+      }
+      if (!new_buf) {
+        return 0;
+      }
+      *buf = new_buf;
+      *cap = new_cap;
+    }
+    (*buf)[(*len)++] = cp;
+    return 1;
+  }
+  for (int i = 0; i < n; ++i) {
+    if (!nfc_full_decompose_append(d, parts[i], buf, len, cap, stack_buf, stack_cap)) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 /* ── Canonical ordering (insertion sort by CCC, stable) ────────────── */
@@ -346,12 +400,14 @@ static inline NfcData* nfc_get_or_load(const char* path);
    Loads NFC data from path only when the slow path is needed. */
 static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   const uint8_t* p = start;
+  int found_high = 0;
 
 #if LIGHTER_PLATFORM_X86
   if (has_avx512) {
     while (p + 64 <= end) {
       __m512i chunk = _mm512_loadu_si512((const void*)p);
       if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
+        found_high = 1;
         break;
       }
       p += 64;
@@ -360,6 +416,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
     while (p + 32 <= end) {
       __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
       if (_mm256_movemask_epi8(chunk) != 0) {
+        found_high = 1;
         break;
       }
       p += 32;
@@ -372,6 +429,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
       /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */
       if (vmaxvq_u8(chunk) >= 0x80) {
+        found_high = 1;
         break;
       }
       p += 16;
@@ -386,6 +444,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
       vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
       if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
+        found_high = 1;
         break;
       }
       p += vl;
@@ -403,14 +462,15 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       p += 8;
     }
   }
-  int pure_ascii = 1;
-  for (const uint8_t* check = p; check < end; ++check) {
-    if (*check >= 0x80) {
-      pure_ascii = 0;
-      break;
+  if (!found_high) {
+    for (const uint8_t* check = p; check < end; ++check) {
+      if (*check >= 0x80) {
+        found_high = 1;
+        break;
+      }
     }
   }
-  if (pure_ascii) {
+  if (!found_high) {
     return NFC_QC_YES;
   }
 
@@ -456,6 +516,7 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
   if (!d) {
     return end;
   }
+  (void)nfc_build_decomp_idx((NfcData*)d);
   /* Byte scan fast path */
   {
     const uint8_t* p = start;
@@ -479,10 +540,16 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
      A stable point is a starter (CCC=0) with NFC_QC=YES where the
      previous character also had CCC=0. */
 
-  uint32_t seg_buf[NFC_SEG_MAX];
+  uint32_t seg_stack[NFC_SEG_STACK_MAX];
+  uint32_t* seg_buf = seg_stack;
+  size_t seg_cap = NFC_SEG_STACK_MAX;
+  uint32_t decomp_stack[NFC_DECOMP_STACK_MAX];
+  uint32_t* decomp = decomp_stack;
+  size_t decomp_cap = NFC_DECOMP_STACK_MAX;
   int seg_len = 0;
   int needs_norm = 0;
   uint8_t last_ccc = 0;
+  int raw_fallback = 0;
 
   while (rp < end) {
     /* Scan one code point */
@@ -501,16 +568,23 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
     if (is_stable) {
       /* Flush previous segment */
       if (needs_norm) {
-        /* Decompose all code points in segment */
-        uint32_t decomp[NFC_SEG_MAX];
-        int dlen = 0;
-        for (int i = 0; i < seg_len && dlen < NFC_SEG_MAX; ++i) {
-          dlen += nfc_full_decompose(d, seg_buf[i], decomp + dlen, NFC_SEG_MAX - dlen);
+        size_t dlen = 0;
+        decomp = decomp_stack;
+        decomp_cap = NFC_DECOMP_STACK_MAX;
+        for (int i = 0; i < seg_len; ++i) {
+          if (!nfc_full_decompose_append(d, seg_buf[i], &decomp, &dlen, &decomp_cap, decomp_stack, NFC_DECOMP_STACK_MAX)) {
+            raw_fallback = 1;
+            goto finish;
+          }
         }
-        nfc_canonical_order(d, decomp, dlen);
-        dlen = nfc_compose_buf(d, decomp, dlen);
-        for (int i = 0; i < dlen; ++i) {
+        nfc_canonical_order(d, decomp, (int)dlen);
+        dlen = (size_t)nfc_compose_buf(d, decomp, (int)dlen);
+        for (size_t i = 0; i < dlen; ++i) {
           wp += nfc_utf8_encode(wp, decomp[i]);
+        }
+        if (decomp != decomp_stack) {
+          free(decomp);
+          decomp = decomp_stack;
         }
       } else {
         /* Copy segment bytes as-is */
@@ -527,9 +601,25 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
     }
 
     /* Accumulate into current segment */
-    if (seg_len < NFC_SEG_MAX) {
-      seg_buf[seg_len++] = cp;
+    if ((size_t)seg_len == seg_cap) {
+      size_t new_cap = seg_cap * 2u;
+      uint32_t* new_buf = NULL;
+      if (seg_buf == seg_stack) {
+        new_buf = (uint32_t*)malloc(new_cap * sizeof(uint32_t));
+        if (new_buf && seg_len) {
+          memcpy(new_buf, seg_stack, (size_t)seg_len * sizeof(uint32_t));
+        }
+      } else {
+        new_buf = (uint32_t*)realloc(seg_buf, new_cap * sizeof(uint32_t));
+      }
+      if (!new_buf) {
+        raw_fallback = 1;
+        goto finish;
+      }
+      seg_buf = new_buf;
+      seg_cap = new_cap;
     }
+    seg_buf[seg_len++] = cp;
     if (qc != NFC_QC_YES || (last_ccc > ccc && ccc != 0)) {
       needs_norm = 1;
     }
@@ -540,15 +630,23 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
   /* Flush final segment */
   if (seg_len > 0) {
     if (needs_norm) {
-      uint32_t decomp[NFC_SEG_MAX];
-      int dlen = 0;
-      for (int i = 0; i < seg_len && dlen < NFC_SEG_MAX; ++i) {
-        dlen += nfc_full_decompose(d, seg_buf[i], decomp + dlen, NFC_SEG_MAX - dlen);
+      size_t dlen = 0;
+      decomp = decomp_stack;
+      decomp_cap = NFC_DECOMP_STACK_MAX;
+      for (int i = 0; i < seg_len; ++i) {
+        if (!nfc_full_decompose_append(d, seg_buf[i], &decomp, &dlen, &decomp_cap, decomp_stack, NFC_DECOMP_STACK_MAX)) {
+          raw_fallback = 1;
+          goto finish;
+        }
       }
-      nfc_canonical_order(d, decomp, dlen);
-      dlen = nfc_compose_buf(d, decomp, dlen);
-      for (int i = 0; i < dlen; ++i) {
+      nfc_canonical_order(d, decomp, (int)dlen);
+      dlen = (size_t)nfc_compose_buf(d, decomp, (int)dlen);
+      for (size_t i = 0; i < dlen; ++i) {
         wp += nfc_utf8_encode(wp, decomp[i]);
+      }
+      if (decomp != decomp_stack) {
+        free(decomp);
+        decomp = decomp_stack;
       }
     } else {
       size_t bytes = (size_t)(rp - seg_begin);
@@ -559,6 +657,20 @@ static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start,
     }
   }
 
+finish:
+  if (raw_fallback) {
+    size_t bytes = (size_t)(end - seg_begin);
+    if (wp != seg_begin) {
+      memmove(wp, seg_begin, bytes);
+    }
+    wp += bytes;
+  }
+  if (seg_buf != seg_stack) {
+    free(seg_buf);
+  }
+  if (decomp != decomp_stack) {
+    free(decomp);
+  }
   return wp;
 }
 /* RLE decode: escape 0x00 = literal escape; escape n (3<=n<=255) + byte = run. */
@@ -877,8 +989,7 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   /* Build speed structures: dense CCC/QC, decomp_idx, comp hash */
   d->ccc_dense = (uint8_t*)malloc(NFC_MAX_CP);
   d->qc_dense = (uint8_t*)malloc(NFC_MAX_CP);
-  d->decomp_idx = (uint32_t*)calloc(NFC_MAX_CP, sizeof(uint32_t));
-  if (!d->ccc_dense || !d->qc_dense || !d->decomp_idx) {
+  if (!d->ccc_dense || !d->qc_dense) {
     goto bin_fail;
   }
   for (uint32_t cp = 0; cp < NFC_MAX_CP; cp++) {
@@ -891,11 +1002,6 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     uint8_t qc_blk = d->pair_map_qc[pair_id];
     uint32_t qc_off = d->stage2_qc_off[qc_blk] + (cp & NFC_BLOCK_MASK);
     d->qc_dense[cp] = (d->stage2_qc_chk[qc_off] == qc_blk) ? d->stage2_qc_val[qc_off] : NFC_QC_YES;
-  }
-  for (size_t i = 0; i < decomp_sparse_count; i++) {
-    uint32_t cp = nfc_decomp_sparse_cp(d, i);
-    uint32_t idx = nfc_decomp_sparse_idx(d, i);
-    d->decomp_idx[cp] = idx;
   }
   /* Size hash: next power of 2 >= 2*comp_size, between NFC_COMP_HASH_MIN and NFC_COMP_HASH_MAX */
   hash_cap = NFC_COMP_HASH_MIN;

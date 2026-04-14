@@ -178,22 +178,86 @@ void do_literal(LighterData* data, const char* literal, size_t length) {
 }
 
 static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  /* Hoist SIMD constants once per call; they're reused across every token found. */
+#if LIGHTER_PLATFORM_X86
+  __m512i z512_s = {0}, z512_t = {0}, z512_r = {0}, z512_n = {0}, z512_q = {0}, z512_mv = {0};
+  __m512i z512_struc1 = {0}, z512_struc2 = {0}, z512_struc3 = {0}, z512_struc4 = {0}, z512_struc5 = {0}, z512_struc6 = {0};
+  __m512i z512_lit1 = {0}, z512_lit2 = {0}, z512_lit3 = {0}, z512_zero = {0}, z512_nine = {0};
+  __m256i y256_s, y256_t, y256_r, y256_n, y256_q, y256_mv, y256_struc12, y256_struc34, y256_struc56;
+  __m256i y256_struc_r, y256_struc_rb, y256_struc_co, y256_lit1, y256_lit2, y256_lit3, y256_zero, y256_nine, y256_zero_byte;
+  (void)y256_s;
+  if (has_avx512) {
+    z512_s = _mm512_set1_epi8(' ');
+    z512_t = _mm512_set1_epi8('\t');
+    z512_r = _mm512_set1_epi8('\r');
+    z512_n = _mm512_set1_epi8('\n');
+    z512_q = _mm512_set1_epi8('"');
+    z512_mv = _mm512_set1_epi8('-');
+    z512_struc1 = _mm512_set1_epi8('{');
+    z512_struc2 = _mm512_set1_epi8('}');
+    z512_struc3 = _mm512_set1_epi8('[');
+    z512_struc4 = _mm512_set1_epi8(']');
+    z512_struc5 = _mm512_set1_epi8(':');
+    z512_struc6 = _mm512_set1_epi8(',');
+    z512_lit1 = _mm512_set1_epi8('t');
+    z512_lit2 = _mm512_set1_epi8('f');
+    z512_lit3 = _mm512_set1_epi8('n');
+    z512_zero = _mm512_set1_epi8('0');
+    z512_nine = _mm512_set1_epi8(9);
+  } else if (has_avx2) {
+    y256_s = _mm256_set1_epi8(' ');
+    y256_t = _mm256_set1_epi8('\t');
+    y256_r = _mm256_set1_epi8('\r');
+    y256_n = _mm256_set1_epi8('\n');
+    y256_q = _mm256_set1_epi8('"');
+    y256_mv = _mm256_set1_epi8('-');
+    y256_struc12 = _mm256_set1_epi8('{');
+    y256_struc34 = _mm256_set1_epi8('[');
+    y256_struc56 = _mm256_set1_epi8(':');
+    y256_struc_r = _mm256_set1_epi8('}');
+    y256_struc_rb = _mm256_set1_epi8(']');
+    y256_struc_co = _mm256_set1_epi8(',');
+    y256_lit1 = _mm256_set1_epi8('t');
+    y256_lit2 = _mm256_set1_epi8('f');
+    y256_lit3 = _mm256_set1_epi8('n');
+    y256_zero = _mm256_set1_epi8('0');
+    y256_nine = _mm256_set1_epi8(9);
+    y256_zero_byte = _mm256_set1_epi8(0);
+  }
+#elif LIGHTER_PLATFORM_ARM64
+  uint8x16_t vs, vt, vr, vn, vq, vmv, vstruc1, vstruc2, vstruc3, vstruc4, vstruc5, vstruc6, vlit1, vlit2, vlit3, vzero, vnine;
+  if (has_neon) {
+    vs = vdupq_n_u8(' ');
+    vt = vdupq_n_u8('\t');
+    vr = vdupq_n_u8('\r');
+    vn = vdupq_n_u8('\n');
+    vq = vdupq_n_u8('"');
+    vmv = vdupq_n_u8('-');
+    vstruc1 = vdupq_n_u8('{');
+    vstruc2 = vdupq_n_u8('}');
+    vstruc3 = vdupq_n_u8('[');
+    vstruc4 = vdupq_n_u8(']');
+    vstruc5 = vdupq_n_u8(':');
+    vstruc6 = vdupq_n_u8(',');
+    vlit1 = vdupq_n_u8('t');
+    vlit2 = vdupq_n_u8('f');
+    vlit3 = vdupq_n_u8('n');
+    vzero = vdupq_n_u8('0');
+    vnine = vdupq_n_u8('9');
+  }
+#endif
   while (data->rindex < data->data_end) {
     uint8_t* p = data->rindex;
 #if LIGHTER_PLATFORM_X86
     if (has_avx512) {
-      __m512i s = _mm512_set1_epi8(' '), t = _mm512_set1_epi8('\t'), r = _mm512_set1_epi8('\r'), n = _mm512_set1_epi8('\n');
-      __m512i q = _mm512_set1_epi8('"'), mv = _mm512_set1_epi8('-');
-      __m512i struc1 = _mm512_set1_epi8('{'), struc2 = _mm512_set1_epi8('}'), struc3 = _mm512_set1_epi8('['), struc4 = _mm512_set1_epi8(']'),
-              struc5 = _mm512_set1_epi8(':'), struc6 = _mm512_set1_epi8(',');
-      __m512i lit1 = _mm512_set1_epi8('t'), lit2 = _mm512_set1_epi8('f'), lit3 = _mm512_set1_epi8('n');
       while (p + 64 <= data->data_end) {
         __m512i c = _mm512_loadu_si512((const void*)p);
-        __mmask64 mk = _mm512_cmpeq_epi8_mask(c, s) | _mm512_cmpeq_epi8_mask(c, t) | _mm512_cmpeq_epi8_mask(c, r) | _mm512_cmpeq_epi8_mask(c, n) |
-                       _mm512_cmpeq_epi8_mask(c, q) | _mm512_cmpeq_epi8_mask(c, mv) | _mm512_cmpeq_epi8_mask(c, struc1) | _mm512_cmpeq_epi8_mask(c, struc2) |
-                       _mm512_cmpeq_epi8_mask(c, struc3) | _mm512_cmpeq_epi8_mask(c, struc4) | _mm512_cmpeq_epi8_mask(c, struc5) |
-                       _mm512_cmpeq_epi8_mask(c, struc6) | _mm512_cmpeq_epi8_mask(c, lit1) | _mm512_cmpeq_epi8_mask(c, lit2) | _mm512_cmpeq_epi8_mask(c, lit3) |
-                       _mm512_cmp_epu8_mask(_mm512_sub_epi8(c, _mm512_set1_epi8('0')), _mm512_set1_epi8(9), _MM_CMPINT_LE);
+        __mmask64 mk = _mm512_cmpeq_epi8_mask(c, z512_s) | _mm512_cmpeq_epi8_mask(c, z512_t) | _mm512_cmpeq_epi8_mask(c, z512_r) |
+                       _mm512_cmpeq_epi8_mask(c, z512_n) | _mm512_cmpeq_epi8_mask(c, z512_q) | _mm512_cmpeq_epi8_mask(c, z512_mv) |
+                       _mm512_cmpeq_epi8_mask(c, z512_struc1) | _mm512_cmpeq_epi8_mask(c, z512_struc2) | _mm512_cmpeq_epi8_mask(c, z512_struc3) |
+                       _mm512_cmpeq_epi8_mask(c, z512_struc4) | _mm512_cmpeq_epi8_mask(c, z512_struc5) | _mm512_cmpeq_epi8_mask(c, z512_struc6) |
+                       _mm512_cmpeq_epi8_mask(c, z512_lit1) | _mm512_cmpeq_epi8_mask(c, z512_lit2) | _mm512_cmpeq_epi8_mask(c, z512_lit3) |
+                       _mm512_cmp_epu8_mask(_mm512_sub_epi8(c, z512_zero), z512_nine, _MM_CMPINT_LE);
         if (mk != 0) {
           p += __builtin_ctzll(mk);
           break;
@@ -201,19 +265,14 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
         p += 64;
       }
     } else if (has_avx2) {
-      __m256i s = _mm256_set1_epi8(' '), t = _mm256_set1_epi8('\t'), r = _mm256_set1_epi8('\r'), n = _mm256_set1_epi8('\n');
-      __m256i q = _mm256_set1_epi8('"'), mv = _mm256_set1_epi8('-');
-      __m256i struc12 = _mm256_set1_epi8('{'), struc34 = _mm256_set1_epi8('['), struc56 = _mm256_set1_epi8(':');
-      __m256i struc_r = _mm256_set1_epi8('}'), struc_rb = _mm256_set1_epi8(']'), struc_co = _mm256_set1_epi8(',');
-      __m256i lit1 = _mm256_set1_epi8('t'), lit2 = _mm256_set1_epi8('f'), lit3 = _mm256_set1_epi8('n');
       while (p + 32 <= data->data_end) {
         __m256i c = _mm256_loadu_si256((const __m256i*)p);
-        __m256i mk = _mm256_or_si256(_mm256_cmpeq_epi8(c, s), _mm256_or_si256(_mm256_cmpeq_epi8(c, t), _mm256_or_si256(_mm256_cmpeq_epi8(c, r),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, n), _mm256_or_si256(_mm256_cmpeq_epi8(c, q), _mm256_or_si256(_mm256_cmpeq_epi8(c, mv),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, struc12), _mm256_or_si256(_mm256_cmpeq_epi8(c, struc34), _mm256_or_si256(_mm256_cmpeq_epi8(c, struc56),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, struc_r), _mm256_or_si256(_mm256_cmpeq_epi8(c, struc_rb), _mm256_or_si256(_mm256_cmpeq_epi8(c, struc_co),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, lit1), _mm256_or_si256(_mm256_cmpeq_epi8(c, lit2), _mm256_cmpeq_epi8(c, lit3))))))))))))))));
-        mk = _mm256_or_si256(mk, _mm256_cmpeq_epi8(_mm256_subs_epu8(_mm256_sub_epi8(c, _mm256_set1_epi8('0')), _mm256_set1_epi8(9)), _mm256_set1_epi8(0)));
+        __m256i mk = _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_s), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_t), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_r),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_n), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_q), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_mv),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc12), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc34), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc56),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_r), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_rb), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_co),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_lit1), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_lit2), _mm256_cmpeq_epi8(c, y256_lit3))))))))))))))));
+        mk = _mm256_or_si256(mk, _mm256_cmpeq_epi8(_mm256_subs_epu8(_mm256_sub_epi8(c, y256_zero), y256_nine), y256_zero_byte));
         uint32_t mask = (uint32_t)_mm256_movemask_epi8(mk);
         if (mask != 0) {
           p += __builtin_ctz(mask);
@@ -224,30 +283,26 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     }
 #elif LIGHTER_PLATFORM_ARM64
     if (has_neon) {
-      uint8x16_t s = vdupq_n_u8(' '), t = vdupq_n_u8('\t'), r = vdupq_n_u8('\r'), n = vdupq_n_u8('\n'), q = vdupq_n_u8('"'), mv = vdupq_n_u8('-');
-      uint8x16_t struc1 = vdupq_n_u8('{'), struc2 = vdupq_n_u8('}'), struc3 = vdupq_n_u8('['), struc4 = vdupq_n_u8(']'), struc5 = vdupq_n_u8(':'),
-                 struc6 = vdupq_n_u8(',');
-      uint8x16_t lit1 = vdupq_n_u8('t'), lit2 = vdupq_n_u8('f'), lit3 = vdupq_n_u8('n');
       while (p + 16 <= data->data_end) {
         uint8x16_t c = vld1q_u8(p);
         uint8x16_t mk = vorrq_u8(
-            vceqq_u8(c, s),
+            vceqq_u8(c, vs),
             vorrq_u8(
-                vceqq_u8(c, t),
-                vorrq_u8(vceqq_u8(c, r),
-                         vorrq_u8(vceqq_u8(c, n),
-                                  vorrq_u8(vceqq_u8(c, q),
-                                           vorrq_u8(vceqq_u8(c, mv),
-                                                    vorrq_u8(vceqq_u8(c, struc1),
-                                                             vorrq_u8(vceqq_u8(c, struc2),
-                                                                      vorrq_u8(vceqq_u8(c, struc3),
-                                                                               vorrq_u8(vceqq_u8(c, struc4),
-                                                                                        vorrq_u8(vceqq_u8(c, struc5),
-                                                                                                 vorrq_u8(vceqq_u8(c, struc6),
-                                                                                                          vorrq_u8(vceqq_u8(c, lit1),
-                                                                                                                   vorrq_u8(vceqq_u8(c, lit2),
-                                                                                                                            vceqq_u8(c, lit3)))))))))))))));
-        mk = vorrq_u8(mk, vandq_u8(vcgeq_u8(c, vdupq_n_u8('0')), vcleq_u8(c, vdupq_n_u8('9'))));
+                vceqq_u8(c, vt),
+                vorrq_u8(vceqq_u8(c, vr),
+                         vorrq_u8(vceqq_u8(c, vn),
+                                  vorrq_u8(vceqq_u8(c, vq),
+                                           vorrq_u8(vceqq_u8(c, vmv),
+                                                    vorrq_u8(vceqq_u8(c, vstruc1),
+                                                             vorrq_u8(vceqq_u8(c, vstruc2),
+                                                                      vorrq_u8(vceqq_u8(c, vstruc3),
+                                                                               vorrq_u8(vceqq_u8(c, vstruc4),
+                                                                                        vorrq_u8(vceqq_u8(c, vstruc5),
+                                                                                                 vorrq_u8(vceqq_u8(c, vstruc6),
+                                                                                                          vorrq_u8(vceqq_u8(c, vlit1),
+                                                                                                                   vorrq_u8(vceqq_u8(c, vlit2),
+                                                                                                                            vceqq_u8(c, vlit3)))))))))))))));
+        mk = vorrq_u8(mk, vandq_u8(vcgeq_u8(c, vzero), vcleq_u8(c, vnine)));
         uint64x2_t u64 = vreinterpretq_u64_u8(mk);
         uint64_t low = vgetq_lane_u64(u64, 0), high = vgetq_lane_u64(u64, 1);
         if (low != 0) {
@@ -323,7 +378,7 @@ static void do_string(LighterData* data, LighterContext* ctx) {
 }
 
 static void do_number(LighterData* data, LighterContext* ctx) {
-  lighter_do_number(data, ctx->precision);
+  lighter_do_number_impl(data, ctx->precision, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
 static int do_object_label(LighterData* data, LighterContext* ctx, int line_start) {
@@ -538,8 +593,15 @@ static int do_dir_win(LighterContext* ctx, PathBuffer* pb) {
     }
 
     if (plen + ulen + 2 > pb->cap) {
-      pb->cap = (plen + ulen + 2) * 2;
-      pb->buf = (char*)realloc(pb->buf, pb->cap);
+      size_t new_cap = (plen + ulen + 2) * 2;
+      char* new_buf = (char*)realloc(pb->buf, new_cap);
+      if (!new_buf) {
+        fprintf(stderr, "Out of memory\n");
+        FindClose(h);
+        return EXIT_FAILURE;
+      }
+      pb->buf = new_buf;
+      pb->cap = new_cap;
     }
 
     if (plen > 0 && pb->buf[plen - 1] != '\\' && pb->buf[plen - 1] != '/') {
@@ -578,8 +640,15 @@ static int do_dir(LighterContext* ctx, PathBuffer* pb) {
 
     size_t elen = strlen(entry->d_name);
     if (plen + elen + 2 > pb->cap) {
-      pb->cap = (plen + elen + 2) * 2;
-      pb->buf = (char*)realloc(pb->buf, pb->cap);
+      size_t new_cap = (plen + elen + 2) * 2;
+      char* new_buf = (char*)realloc(pb->buf, new_cap);
+      if (!new_buf) {
+        fprintf(stderr, "Out of memory\n");
+        closedir(dir);
+        return EXIT_FAILURE;
+      }
+      pb->buf = new_buf;
+      pb->cap = new_cap;
     }
 
     if (plen > 0 && pb->buf[plen - 1] != '/') {
@@ -612,6 +681,7 @@ static int do_file(LighterContext* ctx, char filename[]) {
   LighterEncoding orig_enc = lighter_detect_encoding(map.data, map.size);
   size_t bom_size = lighter_encoding_bom_size(orig_enc, map.data, map.size);
   size_t actual_size = map.size - bom_size;
+  size_t orig_file_size = map.size; /* preserve for final savings report */
 
   if (orig_enc != LIGHTER_ENC_UTF8) {
     size_t max_utf8 = (orig_enc == LIGHTER_ENC_UTF16LE || orig_enc == LIGHTER_ENC_UTF16BE) ? (actual_size * 3 / 2) + 4 : actual_size + 4;
@@ -641,9 +711,10 @@ static int do_file(LighterContext* ctx, char filename[]) {
       lighter_map_unmap(old_data, old_size_full);
     }
     bom_size = 0; /* BOM was already stripped during transcoding */
-  } else {
-    map.size = actual_size;
   }
+  /* For UTF-8 with a BOM, leave map.size alone; rindex starts past the BOM so the
+   * source range is [map.data + bom_size, map.data + map.size). data_start stays at
+   * map.data so windex can overwrite the BOM with minified content. */
 
   LighterData data;
   data.data_start = map.data;
@@ -653,10 +724,6 @@ static int do_file(LighterContext* ctx, char filename[]) {
   data.lindex = data.rindex;
 
   int exit_code = EXIT_SUCCESS;
-  ctx->has_avx512 = lighter_cpu_supports_avx512bw();
-  ctx->has_avx2 = lighter_cpu_supports_avx2();
-  ctx->has_neon = lighter_cpu_supports_neon();
-  ctx->has_rvv = lighter_cpu_supports_rvv();
   do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0); /* clean up leading newlines in -N mode */
   if (ctx->newlines) {
     while (data.rindex < data.data_end) {
@@ -671,13 +738,18 @@ static int do_file(LighterContext* ctx, char filename[]) {
   size_t written = (size_t)(data.windex - data.data_start);
   if (orig_enc != LIGHTER_ENC_UTF8 && written > 0) {
     uint8_t* temp_utf8 = (uint8_t*)malloc(written);
-    if (temp_utf8) {
-      memcpy(temp_utf8, data.data_start, written);
-      size_t back_size;
-      lighter_transcode_from_utf8(temp_utf8, written, orig_enc, map.data, &back_size);
-      written = back_size;
-      free(temp_utf8);
+    if (!temp_utf8) {
+      fprintf(stderr, "Out of memory re-transcoding %s\n", filename);
+      lighter_map_close(&map);
+      return EXIT_FAILURE;
     }
+    memcpy(temp_utf8, data.data_start, written);
+    size_t back_size;
+    /* BOM is stripped; transcode preserves the original byte order. Byte order is
+     * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
+    lighter_transcode_from_utf8(temp_utf8, written, orig_enc, map.data, &back_size);
+    written = back_size;
+    free(temp_utf8);
   }
 
   if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {
@@ -689,8 +761,10 @@ static int do_file(LighterContext* ctx, char filename[]) {
   }
 
   lighter_map_close(&map);
-  if (!ctx->quiet && data.data_end > data.data_start) {
-    printf("Saved %lu bytes\n", (unsigned long)(data.data_end - data.windex));
+  if (!ctx->quiet && orig_file_size > written) {
+    printf("Saved %lu bytes\n", (unsigned long)(orig_file_size - written));
+  } else if (!ctx->quiet) {
+    printf("Saved 0 bytes\n");
   }
   return exit_code;
 }
@@ -720,10 +794,11 @@ int main(int argc, char* argv[]) {
       .disable_nfc = 0,
       .async_io = 0,
       .safe_mode = 0,
-      .has_avx512 = 0,
-      .has_avx2 = 0,
-      .has_neon = 0,
-      .has_rvv = 0,
+      /* CPU feature probes run once at startup; cached for every file/number/string. */
+      .has_avx512 = lighter_cpu_supports_avx512bw(),
+      .has_avx2 = lighter_cpu_supports_avx2(),
+      .has_neon = lighter_cpu_supports_neon(),
+      .has_rvv = lighter_cpu_supports_rvv(),
   };
   char* i;
   int optind_val = 1;

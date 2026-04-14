@@ -61,7 +61,11 @@ static inline uint64_t lighter_string_hex_value(LighterData* data) {
 static inline void lighter_string_do_unicode(LighterData* data) {
   uint64_t value = lighter_string_hex_value(data);
   if (value == (uint64_t)INT64_MAX) {
-    fprintf(stderr, "INVALID HEX\n");
+    /* Malformed \uXXXX: pass through the remaining bytes as-is so we don't
+     * corrupt surrounding data or loop forever. */
+    if (data->rindex < data->data_end) {
+      ++(data->rindex);
+    }
     return;
   }
   data->rindex += UNICODE_ESCAPE_HEX_LEN;
@@ -134,28 +138,31 @@ static inline void lighter_string_do_unicode(LighterData* data) {
 }
 
 static inline void lighter_string_do_escape(LighterData* data) {
-  if (data->rindex + 1 < data->data_end) {
-    switch (data->rindex[1]) {
-      case 'u':
-        lighter_write_data(data, 0); /* flush before \u */
-        data->rindex += 2;           /* skip \u */
-        data->lindex = data->rindex;
-        lighter_string_do_unicode(data);
-        break;
-      case '"':
-      case '\\':
-      case '/':
-      case 'b':
-      case 'f':
-      case 'n':
-      case 'r':
-      case 't':
-        data->rindex += 2;
-        break;
-      default:
-        lighter_write_data(data, 1);
-        ++(data->rindex);
-    }
+  if (LIGHTER_UNLIKELY(data->rindex + 1 >= data->data_end)) {
+    /* Trailing '\\' at end of input — advance past it to avoid infinite loop. */
+    ++(data->rindex);
+    return;
+  }
+  switch (data->rindex[1]) {
+    case 'u':
+      lighter_write_data(data, 0); /* flush before \u */
+      data->rindex += 2;           /* skip \u */
+      data->lindex = data->rindex;
+      lighter_string_do_unicode(data);
+      break;
+    case '"':
+    case '\\':
+    case '/':
+    case 'b':
+    case 'f':
+    case 'n':
+    case 'r':
+    case 't':
+      data->rindex += 2;
+      break;
+    default:
+      lighter_write_data(data, 1);
+      ++(data->rindex);
   }
 }
 
@@ -293,14 +300,20 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
       lighter_string_do_escape(data);
       break;
     case '"': {
+      /* lindex points at the opening quote; rindex points at the closing quote.
+       * Content is [lindex+1, rindex). Flush the pending segment (opening quote plus
+       * content), then normalize the content in place if needed. */
       if (!disable_nfc && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_avx512, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
         ptrdiff_t pending = data->rindex - data->lindex;
-        lighter_write_data(data, 0);
+        lighter_write_data(data, 1); /* flush [opening quote .. content), consume closing quote */
+        /* After flush: windex moved forward by `pending` bytes; output now has
+         * [windex-pending, windex) = [opening quote .. content). Normalize content. */
         uint8_t* str_content_start = data->windex - pending + 1;
-        uint8_t* str_content_end = data->windex - 1;
+        uint8_t* str_content_end = data->windex;
         uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
-        memmove(new_end, data->windex - 1, 1);
-        data->windex = new_end + 1;
+        /* Append the closing quote immediately after the (possibly shorter) content. */
+        data->windex = new_end;
+        *data->windex++ = '"';
       } else {
         ++(data->rindex);
       }

@@ -14,35 +14,34 @@
 
 /** Write an exponent string adjusted by a small delta. Performs string-based addition/subtraction. */
 static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* start, uint64_t len, int negative, int64_t delta) {
-  if (negative) {
-    delta = -delta;
-  }
+  /* Compute output = (negative ? -|digits| : +|digits|) + delta.
+   * For huge |digits|, |delta| << |digits|, so the output sign matches `negative`.
+   * Whether we add or subtract on the absolute value is determined by:
+   *   add iff sign(delta) matches the original sign. */
+  int add_op = (delta >= 0) ? !negative : negative;
+  int64_t d = delta < 0 ? -delta : delta;
 
   if (len == 0) {
+    /* No digits: output is just delta. Sign = sign(delta). */
     if (delta == 0) {
       *data->windex++ = '0';
       return;
     }
     if (delta < 0) {
-      negative = 1;
-      delta = -delta;
-    } else {
-      negative = 0;
-    }
-    uint32_t digits = lighter_digits_u64((uint64_t)delta);
-    if (negative) {
       *data->windex++ = '-';
     }
+    uint32_t digits = lighter_digits_u64((uint64_t)d);
     data->windex += digits;
     uint8_t* p = data->windex;
-    while (delta) {
-      *(--p) = (delta % 10) + '0';
-      delta /= 10;
+    while (d) {
+      *(--p) = (d % 10) + '0';
+      d /= 10;
     }
     return;
   }
 
   if (len < 18) {
+    /* Fits in uint64_t. Compute in signed arithmetic. */
     int64_t val = 0;
     for (uint64_t i = 0; i < len; ++i) {
       val = val * 10 + (start[i] - '0');
@@ -69,9 +68,12 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
     return;
   }
 
-  /* Huge string math - we know delta is small, so we can do it in two passes
-   * or carefully check for expansion/contraction. */
-  if (delta == 0) {
+  /* Huge string math. |digits| dominates |delta|; sign stays `negative`.
+   * The source [start, start+len) may overlap the write destination, so use
+   * lighter_write_data to copy the digits into place first (overlap-safe), then
+   * do carry/borrow propagation in-place. Carry/borrow usually terminates within
+   * a few digits. */
+  if (d == 0) {
     if (negative) {
       *data->windex++ = '-';
     }
@@ -81,90 +83,71 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
     return;
   }
 
-  /* For huge case, we assume it stays mostly the same length.
-   * If delta > 0, it might expand by 1.
-   * If delta < 0, it might shrink. */
-  if (delta > 0 && !negative) {
-    /* Potential expansion check */
-    int carry = (int)delta;
-    for (int64_t i = (int64_t)len - 1; i >= 0; --i) {
-      int v = (start[i] - '0') + carry;
-      carry = v / 10;
-      if (carry == 0) {
-        break;
-      }
-    }
-    if (negative) {
-      *data->windex++ = '-';
-    }
-    if (carry) {
-      *data->windex++ = (uint8_t)(carry + '0');
-    }
-    data->windex += len;
-    uint8_t* p = data->windex;
-    carry = (int)delta;
-    for (int64_t i = (int64_t)len - 1; i >= 0; --i) {
-      int v = (start[i] - '0') + carry;
-      *(--p) = (uint8_t)((v % 10) + '0');
-      carry = v / 10;
-    }
-  } else if (delta < 0 && negative) {
-    /* Same as above but for negative addition */
-    int64_t d = -delta;
+  if (negative) {
+    *data->windex++ = '-';
+  }
+  /* Flush the exponent digits from [start, start+len) into the output area. After
+   * this call, the digits live at [windex-len, windex) (contiguous, no overlap). */
+  uint8_t* prev_lindex = data->lindex;
+  uint8_t* prev_rindex = data->rindex;
+  data->lindex = start;
+  data->rindex = start + len;
+  lighter_write_data(data, 0);
+  data->lindex = prev_lindex;
+  data->rindex = prev_rindex;
+  uint8_t* dst = data->windex - len;
+
+  if (add_op) {
     int carry = (int)d;
     for (int64_t i = (int64_t)len - 1; i >= 0; --i) {
-      int v = (start[i] - '0') + carry;
-      carry = v / 10;
-      if (carry == 0) {
+      int v = (dst[i] - '0') + carry;
+      if (v < 10) {
+        dst[i] = (uint8_t)(v + '0');
+        carry = 0;
         break;
       }
+      dst[i] = (uint8_t)((v - 10) + '0');
+      carry = 1;
     }
-    *data->windex++ = '-';
     if (carry) {
-      *data->windex++ = (uint8_t)(carry + '0');
-    }
-    data->windex += len;
-    uint8_t* p = data->windex;
-    carry = (int)d;
-    for (int64_t i = (int64_t)len - 1; i >= 0; --i) {
-      int v = (start[i] - '0') + carry;
-      *(--p) = (uint8_t)((v % 10) + '0');
-      carry = v / 10;
+      /* All digits were 9; expand by one leading digit. Use write_data to shift
+       * [dst, dst+len) right by 1, then write '1' at dst[0]. */
+      data->windex = dst + 1;
+      data->lindex = dst;
+      data->rindex = dst + len;
+      lighter_write_data(data, 0);
+      /* After write_data: windex = dst+1+len (correct final position). Restore book-keeping. */
+      data->lindex = prev_lindex;
+      data->rindex = prev_rindex;
+      dst[0] = '1';
     }
   } else {
-    /* Subtraction case: (Huge string) - |delta|
-     * Result is always positive or zero because original is "huge". */
-    int64_t d = delta < 0 ? -delta : delta;
     int borrow = (int)d;
-    /* We work in a temporary way but NO buffer.
-     * We know it won't expand. It might shrink. */
-    uint8_t* base = data->windex;
-    if (negative) {
-      *base++ = '-';
-    }
-    uint8_t* p = base + len;
     for (int64_t i = (int64_t)len - 1; i >= 0; --i) {
-      int v = (start[i] - '0') - borrow;
-      if (v < 0) {
-        int nb = (9 - v) / 10;
-        v += nb * 10;
-        borrow = nb;
-      } else {
+      int v = (dst[i] - '0') - borrow;
+      if (v >= 0) {
+        dst[i] = (uint8_t)(v + '0');
         borrow = 0;
+        break;
       }
-      *(--p) = (uint8_t)(v + '0');
+      dst[i] = (uint8_t)((v + 10) + '0');
+      borrow = 1;
     }
-    /* Identify actual digit range and use lighter_write_data for the move */
-    uint8_t* actual_end = data->windex + (negative ? 1 : 0) + len;
-    while (base < actual_end - 1 && *base == '0') {
-      base++;
+    /* Leading digit may have dropped to 0; collapse leading zeros via write_data. */
+    uint8_t* end = data->windex;
+    uint8_t* lead = dst;
+    while (lead < end - 1 && *lead == '0') {
+      ++lead;
     }
-    if (negative) {
-      data->windex++; /* Keep the '-' already written at the start */
+    if (lead != dst) {
+      data->windex = dst;
+      data->lindex = lead;
+      data->rindex = end;
+      lighter_write_data(data, 0);
+      /* windex now at dst + (end-lead), correct. */
+      data->lindex = prev_lindex;
+      data->rindex = prev_rindex;
     }
-    data->lindex = base;
-    data->rindex = actual_end;
-    lighter_write_data(data, 0);
   }
 }
 
@@ -201,7 +184,6 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
 
   /* Loop 1: Find decimal, exponent marker, and significant digit bounds */
   for (i = p_scan; i < data->data_end && !exponent && !number_end;) {
-    int skip_bounds = (precision == LIGHTER_PRECISION_UNLIMITED);
     /* SIMD acceleration for long significands */
 #if LIGHTER_PLATFORM_X86
     if (has_avx2 && i + 32 <= data->data_end) {
@@ -224,7 +206,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
         }
 
         /* Process up to first_action for non-zero bounds */
-        if (LIGHTER_LIKELY(!skip_bounds)) {
+        {
           __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
           uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
           if (mask_nonzero) {
@@ -241,7 +223,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
         /* Exit SIMD and let scalar handle the special character */
       } else {
         /* Fast skip: All are digits, update bounds */
-        if (LIGHTER_LIKELY(!skip_bounds)) {
+        {
           __m256i m_nonzero = _mm256_andnot_si256(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8('0')), m_digit);
           uint32_t mask_nonzero = lighter_simd_mask_avx2(m_nonzero);
           if (mask_nonzero) {
@@ -271,7 +253,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
         /* Exit SIMD for simplicity on action point */
       } else {
         /* Fast skip: update bounds */
-        if (LIGHTER_LIKELY(!skip_bounds)) {
+        {
           uint8x16_t m_nonzero = vbicq_u8(m_digit, vceqq_u8(chunk, vdupq_n_u8('0')));
           uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 0);
           uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(m_nonzero), 1);
@@ -305,7 +287,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       intptr_t action = __riscv_vfirst_m_b8(__riscv_vmor_mm_b8(m_delimit, m_invalid, vl), vl);
 
       if (LIGHTER_UNLIKELY(action >= 0)) {
-        if (LIGHTER_LIKELY(!skip_bounds)) {
+        {
           vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
           intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
           if (fnz >= 0 && fnz < action) {
@@ -322,7 +304,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
         }
         i += action;
       } else {
-        if (LIGHTER_LIKELY(!skip_bounds)) {
+        {
           vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
           intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
           if (fnz >= 0) {
@@ -371,12 +353,10 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       case '7':
       case '8':
       case '9':
-        if (LIGHTER_LIKELY(!skip_bounds)) {
-          if (LIGHTER_LIKELY(!non_zero_start)) {
-            non_zero_start = i;
-          }
-          non_zero_finish = i;
+        if (LIGHTER_LIKELY(!non_zero_start)) {
+          non_zero_start = i;
         }
+        non_zero_finish = i;
         break;
       default:
         number_end = i - 1;
@@ -481,14 +461,12 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     number_end = data->data_end - 1;
   }
   if (LIGHTER_UNLIKELY(!non_zero_start)) {
+    /* Value is zero. Emit just '0' (sign dropped for -0) and skip the whole source number. */
     if (negative) {
       --(data->rindex);
     }
-    if (number_end == data->rindex) {
-      ++(data->rindex);
-    } else {
-      lighter_write_data(data, number_end - data->rindex);
-    }
+    lighter_write_data(data, number_end + 1 - data->rindex);
+    *data->windex++ = '0';
     return;
   }
   if (!exponent_start) {
@@ -508,23 +486,28 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       if (LIGHTER_UNLIKELY(exponent_value > 922337203685477580LL || (exponent_value == 922337203685477580LL && (*i - '0') > 7))) {
         exponent_value = 9223372036854775807LL;
         exponent_saturated = 1;
-      } else {
-        exponent_value = exponent_value * 10 + (*i - '0');
+        break; /* further digits don't change the saturated value */
       }
+      exponent_value = exponent_value * 10 + (*i - '0');
     }
   }
   if (negative_exponent) {
     exponent_value *= -1;
   }
-  int64_t delta_max = (int64_t)(decimal ? decimal > non_zero_start ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_start;
-  int64_t delta_min = (int64_t)(decimal ? decimal > non_zero_finish ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_finish;
-
   int is_huge = exponent_saturated;
-  if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_max, &max_exponent))) {
-    is_huge = 1;
-  }
-  if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_min, &min_exponent))) {
-    is_huge = 1;
+  if (LIGHTER_UNLIKELY(is_huge)) {
+    /* Already saturated; delta arithmetic is irrelevant. */
+    max_exponent = exponent_value;
+    min_exponent = exponent_value;
+  } else {
+    int64_t delta_max = (int64_t)(decimal ? decimal > non_zero_start ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_start;
+    int64_t delta_min = (int64_t)(decimal ? decimal > non_zero_finish ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) - (int64_t)non_zero_finish;
+    if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_max, &max_exponent))) {
+      is_huge = 1;
+    }
+    if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_min, &min_exponent))) {
+      is_huge = 1;
+    }
   }
 
   if (LIGHTER_LIKELY(precision == LIGHTER_PRECISION_UNLIMITED)) {
@@ -536,7 +519,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       if (negative) {
         --(data->rindex);
       }
-      lighter_write_data(data, number_end - data->rindex);
+      lighter_write_data(data, number_end + 1 - data->rindex);
       *data->windex++ = '0';
       return;
     }
@@ -546,13 +529,24 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       if (negative) {
         --(data->rindex);
       }
-      lighter_write_data(data, number_end - data->rindex);
+      lighter_write_data(data, number_end + 1 - data->rindex);
       *data->windex++ = '0';
       return;
     }
     if (-precision > min_exponent) {
       min_exponent = -precision;
-      i = (decimal ? decimal > data->rindex + precision ? decimal - 1 : decimal : exponent ? exponent - 1 : number_end) + precision + exponent_value;
+      /* Compute the rounding-cut byte position from a known-safe anchor.
+       * Clamp i into [non_zero_start - 1, non_zero_finish] to protect the *(i+1) read below. */
+      uint8_t* anchor = decimal ? (decimal > non_zero_start ? decimal - 1 : decimal) : exponent ? exponent - 1 : number_end;
+      int64_t shift = precision + exponent_value;
+      ptrdiff_t max_shift = (ptrdiff_t)(non_zero_finish - anchor);
+      ptrdiff_t min_shift = (ptrdiff_t)(non_zero_start - 1 - anchor);
+      if (shift > max_shift) {
+        shift = max_shift;
+      } else if (shift < min_shift) {
+        shift = min_shift;
+      }
+      i = anchor + shift;
       if (i < non_zero_finish) {
         if (*(i + 1) >= '5') {
           for (; i >= non_zero_start; --i) {
@@ -598,40 +592,70 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
   if (LIGHTER_UNLIKELY(non_zero_start > data->rindex)) {
     lighter_write_data(data, non_zero_start - data->rindex);
   }
-  if (LIGHTER_LIKELY(decimal == data->rindex + (ptrdiff_t)new_decimal && exponent_value == new_exponent && !zeroes && !is_huge)) {
-    data->rindex += digit_width;
-    if (decimal) {
-      ++(data->rindex);
-    }
+  if (LIGHTER_LIKELY(!is_huge && decimal == data->rindex + (ptrdiff_t)new_decimal && exponent_value == new_exponent)) {
+    /* Source layout already matches target: just advance rindex past the digits. */
+    data->rindex += zeroes + digit_width + (decimal ? 1 : 0);
   } else if (zeroes && max_exponent < 0) {
-    *data->windex++ = '0';
-    *data->windex++ = '.';
-    while (zeroes > 1) {
-      *data->windex++ = '0';
-      --zeroes;
+    /* Original algorithm from commit 6812f60, with a leading flush added so any
+     * pending '-' isn't overwritten by the '0' or '.' back-fill below. */
+    if (data->lindex < data->rindex) {
+      lighter_write_data(data, 0);
     }
-    data->lindex = non_zero_start;
-    data->rindex = non_zero_finish + 1;
-    lighter_write_data(data, 0);
-  } else {
-    if (new_decimal) {
-      data->lindex = non_zero_start;
-      data->rindex = non_zero_start + new_decimal;
-      lighter_write_data(data, 0);
-      *data->windex++ = '.';
-      data->lindex = data->rindex + (decimal && (non_zero_start + (ptrdiff_t)new_decimal > decimal) ? 1 : 0);
+    i = data->windex;
+    data->windex += zeroes + 1;
+    if (non_zero_start < decimal && non_zero_finish > decimal) {
+      lighter_write_data(data, decimal - non_zero_start + 1);
       data->rindex = non_zero_finish + 1;
-      lighter_write_data(data, 0);
+      data->windex += decimal - non_zero_start;
+      lighter_write_data(data, -(ptrdiff_t)digit_width - 1);
+      data->rindex = decimal;
+      data->windex = i + zeroes + 1;
+      lighter_write_data(data, non_zero_finish - decimal);
+      data->windex += non_zero_finish - decimal;
     } else {
       data->rindex = non_zero_finish + 1;
+    }
+    lighter_write_data(data, 0);
+    *i++ = '0';
+    *i++ = '.';
+    if (zeroes > 1) {
+      *i = '0';
+    }
+  } else {
+    /* Original algorithm from commit 6812f60. */
+    if (decimal) {
+      if ((!new_decimal && non_zero_start < decimal && non_zero_finish > decimal) || (new_decimal && non_zero_start + new_decimal > decimal)) {
+        data->rindex = decimal;
+        lighter_write_data(data, 1);
+      } else if (new_decimal && decimal && non_zero_start + new_decimal < decimal) {
+        data->rindex = non_zero_start + new_decimal;
+        lighter_write_data(data, 0);
+        i = data->windex++;
+        data->rindex = decimal;
+        lighter_write_data(data, 1);
+        *i = '.';
+      }
+    }
+    if (new_decimal && (!decimal || non_zero_start + new_decimal > decimal)) {
+      data->rindex = non_zero_start + new_decimal + (decimal ? 1 : 0);
       lighter_write_data(data, 0);
+      i = data->windex++;
+      data->rindex = non_zero_finish + 1;
+      lighter_write_data(data, 0);
+      *i = '.';
+    } else {
+      data->rindex = non_zero_finish + 1;
     }
-    while (zeroes) {
-      *data->windex++ = '0';
-      --zeroes;
-    }
-    if (new_decimal && !decimal) {
-      *data->windex++ = '0';
+    if (zeroes) {
+      if (non_zero_finish + 1 + zeroes == (exponent ? exponent : number_end)) {
+        data->rindex += zeroes;
+      } else {
+        lighter_write_data(data, 0);
+        *data->windex++ = '0';
+        if (zeroes > 1) {
+          *data->windex++ = '0';
+        }
+      }
     }
   }
   if (LIGHTER_UNLIKELY(exponent > data->rindex)) {
@@ -681,8 +705,10 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       }
     }
   }
-  if (number_end > data->rindex) {
-    lighter_write_data(data, number_end - data->rindex);
+  /* Advance past the last byte of the number so the caller's outer loop doesn't
+   * re-enter do_number on a leftover exponent digit. */
+  if (number_end + 1 > data->rindex) {
+    lighter_write_data(data, (number_end + 1) - data->rindex);
   }
 }
 

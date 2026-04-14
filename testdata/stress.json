@@ -1,0 +1,41 @@
+{
+  "nested_arrays": [[[[[[[1,2,3]]]]]]],
+  "nested_objects": {"a":{"b":{"c":{"d":{"e":"deep"}}}}},
+  "mixed_depth": [{"a":[1,{"b":[2,3]},4]},{"c":5}],
+  "empty_collections": [[],{},[[]],[{}],{"k":[]},{"k":{}}],
+  "strings_with_escapes": {
+    "tab": "hello\tworld",
+    "newline": "hello\nworld",
+    "backslash": "hello\\world",
+    "quote": "hello\"world",
+    "slash": "hello\/world",
+    "unicode_esc": "\u0041\u0042\u0043",
+    "surrogate": "\uD83D\uDE00",
+    "bs": "\b",
+    "ff": "\f",
+    "cr": "\r",
+    "low_unicode": "\u0001\u0002\u0003"
+  },
+  "all_literals": [true, false, null],
+  "whitespace_in_objects": { "a" : 1 , "b" : 2 },
+  "key_types": {
+    "": "empty key",
+    " ": "space key",
+    "key with space": "value",
+    "key\nwith\nnewline": "value",
+    "数字": "unicode key",
+    "🔑": "emoji key"
+  },
+  "number_forms": [0, 0.0, 0e0, -0, -0.0, 1e0, 1.0e0, 0.1e1, 10e-1, 100e-2],
+  "extreme_numbers": [
+    1.7976931348623157e308,
+    2.2250738585072014e-308,
+    9007199254740993,
+    9007199254740992,
+    12345678901234567890
+  ],
+  "array_with_mixed": [1, "two", 3.14, true, null, [1,2], {"k":"v"}],
+  "duplicated_keys": {"a":1,"a":2},
+  "comma_spacing": [1 , 2 , 3],
+  "trailing_ws_in_string": "hello   "
+}

@@ -850,11 +850,13 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   }
 
   /* Keep decomp sparse as NFC_DECOMP_SPARSE_ENTRY_BYTES per entry in memory (no unpack) */
-  decomp_buf = (uint8_t*)malloc((size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
-  if (!decomp_buf && decomp_sparse_count > 0) {
-    goto bin_fail;
+  if (decomp_sparse_count > 0) {
+    decomp_buf = (uint8_t*)malloc((size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
+    if (!decomp_buf) {
+      goto bin_fail;
+    }
+    memcpy(decomp_buf, data + off_decomp_sparse, (size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
   }
-  memcpy(decomp_buf, data + off_decomp_sparse, (size_t)decomp_sparse_count * NFC_DECOMP_SPARSE_ENTRY_BYTES);
   d->decomp_sparse = decomp_buf;
 
   /* Unpack comp table (3×21-bit per entry, 8 bytes on disk) */

@@ -370,8 +370,8 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       if (has_neon) {
     while (p + 16 <= end) {
       uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
-      uint32x4_t masked = vreinterpretq_u32_u8(vandq_u8(chunk, vdupq_n_u8(0x80)));
-      if (vmaxvq_u32(masked) != 0) {
+      /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */
+      if (vmaxvq_u8(chunk) >= 0x80) {
         break;
       }
       p += 16;

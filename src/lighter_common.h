@@ -33,10 +33,13 @@ static inline int lighter_has_byte(uint64_t v, uint8_t c) {
 
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */
 static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset) {
-  if (data->windex != data->lindex) {
-    memmove(data->windex, data->lindex, (size_t)(data->rindex - data->lindex));
+  ptrdiff_t pending = data->rindex - data->lindex;
+  if (pending) {
+    if (data->windex != data->lindex) {
+      memmove(data->windex, data->lindex, (size_t)pending);
+    }
+    data->windex += pending;
   }
-  data->windex += data->rindex - data->lindex;
   data->rindex += index_offset;
   data->lindex = data->rindex;
 }

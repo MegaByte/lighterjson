@@ -171,93 +171,83 @@ static inline void lighter_string_do_escape(LighterData* data) {
 #if LIGHTER_PLATFORM_X86
 LIGHTER_TARGET_AVX512
 static inline void lighter_simd_avx512_string_skip(LighterData* data) {
+  const __m512i quote = _mm512_set1_epi8('"');
+  const __m512i escape = _mm512_set1_epi8('\\');
   while (data->rindex + 64 <= data->data_end) {
     __m512i chunk = _mm512_loadu_si512((const void*)data->rindex);
-    __m512i quote = _mm512_set1_epi8('"');
-    __m512i escape = _mm512_set1_epi8('\\');
-
-    __mmask64 test_quote = _mm512_cmpeq_epi8_mask(chunk, quote);
-    __mmask64 test_escape = _mm512_cmpeq_epi8_mask(chunk, escape);
-    __mmask64 test_either = test_quote | test_escape;
-
+    __mmask64 test_either = _mm512_cmpeq_epi8_mask(chunk, quote) | _mm512_cmpeq_epi8_mask(chunk, escape);
     if (test_either == 0) {
       data->rindex += 64;
-    } else {
+      continue;
+    }
   #if defined(_MSC_VER)
-      unsigned long offset;
+    unsigned long offset;
     #if defined(_M_X64)
-      _BitScanForward64(&offset, test_either);
-      data->rindex += offset;
+    _BitScanForward64(&offset, test_either);
+    data->rindex += offset;
     #else
-      if ((uint32_t)test_either != 0) {
-        _BitScanForward(&offset, (uint32_t)test_either);
-        data->rindex += offset;
-      } else {
-        _BitScanForward(&offset, (uint32_t)(test_either >> 32));
-        data->rindex += offset + 32;
-      }
+    if ((uint32_t)test_either != 0) {
+      _BitScanForward(&offset, (uint32_t)test_either);
+      data->rindex += offset;
+    } else {
+      _BitScanForward(&offset, (uint32_t)(test_either >> 32));
+      data->rindex += offset + 32;
+    }
     #endif
   #else
-      data->rindex += __builtin_ctzll(test_either);
+    data->rindex += __builtin_ctzll(test_either);
   #endif
-      return;
-    }
+    return;
   }
 }
 
 LIGHTER_TARGET_AVX2
 static inline void lighter_simd_avx2_string_skip(LighterData* data) {
+  const __m256i quote = _mm256_set1_epi8('"');
+  const __m256i escape = _mm256_set1_epi8('\\');
   while (data->rindex + 32 <= data->data_end) {
     __m256i chunk = _mm256_loadu_si256((const __m256i*)data->rindex);
-    __m256i quote = _mm256_set1_epi8('"');
-    __m256i escape = _mm256_set1_epi8('\\');
-
-    __m256i test_quote = _mm256_cmpeq_epi8(chunk, quote);
-    __m256i test_escape = _mm256_cmpeq_epi8(chunk, escape);
-    __m256i test_either = _mm256_or_si256(test_quote, test_escape);
-
+    __m256i test_either = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, quote), _mm256_cmpeq_epi8(chunk, escape));
     uint32_t mask = (uint32_t)_mm256_movemask_epi8(test_either);
-
     if (mask == 0) {
       data->rindex += 32;
-    } else {
-  #if defined(_MSC_VER)
-      unsigned long offset;
-      _BitScanForward(&offset, mask);
-      data->rindex += offset;
-  #else
-      data->rindex += __builtin_ctz(mask);
-  #endif
-      return;
+      continue;
     }
+  #if defined(_MSC_VER)
+    unsigned long offset;
+    _BitScanForward(&offset, mask);
+    data->rindex += offset;
+  #else
+    data->rindex += __builtin_ctz(mask);
+  #endif
+    return;
   }
 }
 #endif /* LIGHTER_PLATFORM_X86 */
 #if LIGHTER_PLATFORM_ARM64
 static inline void lighter_simd_neon_string_skip(LighterData* data) {
+  const uint8x16_t quote = vdupq_n_u8('"');
+  const uint8x16_t escape = vdupq_n_u8('\\');
   while (data->rindex + 16 <= data->data_end) {
     uint8x16_t chunk = vld1q_u8((const uint8_t*)data->rindex);
-    uint8x16_t quote = vdupq_n_u8('"');
-    uint8x16_t escape = vdupq_n_u8('\\');
-
-    uint8x16_t test_quote = vceqq_u8(chunk, quote);
-    uint8x16_t test_escape = vceqq_u8(chunk, escape);
-    uint8x16_t test_either = vorrq_u8(test_quote, test_escape);
-
+    uint8x16_t test_either = vorrq_u8(vceqq_u8(chunk, quote), vceqq_u8(chunk, escape));
+    /* Fast any-set check via horizontal max, then locate via two-u64 extract. */
+    if (vmaxvq_u8(test_either) == 0) {
+      data->rindex += 16;
+      continue;
+    }
     uint64x2_t u64 = vreinterpretq_u64_u8(test_either);
     uint64_t low = vgetq_lane_u64(u64, 0);
-    uint64_t high = vgetq_lane_u64(u64, 1);
-
-    if (low != 0) {
+    if (low) {
   #if defined(_MSC_VER)
       unsigned long offset;
       _BitScanForward64(&offset, low);
-      data->rindex += (offset >> 3);
+      data->rindex += offset >> 3;
   #else
       data->rindex += __builtin_ctzll(low) >> 3;
   #endif
-      return;
-    } else if (high != 0) {
+    } else {
+      uint64_t high = vgetq_lane_u64(u64, 1);
   #if defined(_MSC_VER)
       unsigned long offset;
       _BitScanForward64(&offset, high);
@@ -265,9 +255,8 @@ static inline void lighter_simd_neon_string_skip(LighterData* data) {
   #else
       data->rindex += (__builtin_ctzll(high) >> 3) + 8;
   #endif
-      return;
     }
-    data->rindex += 16;
+    return;
   }
 }
 #endif

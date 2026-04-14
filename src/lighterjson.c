@@ -178,13 +178,12 @@ void do_literal(LighterData* data, const char* literal, size_t length) {
 }
 
 static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  /* Hoist SIMD constants once per call; they're reused across every token found. */
+  /* SIMD pre-scan skips over structural bytes (they're no-ops in the scalar switch)
+   * to find the next "interesting" byte: whitespace, '"', '-', or a digit. */
 #if LIGHTER_PLATFORM_X86
   __m512i z512_s = {0}, z512_t = {0}, z512_r = {0}, z512_n = {0}, z512_q = {0}, z512_mv = {0};
-  __m512i z512_struc1 = {0}, z512_struc2 = {0}, z512_struc3 = {0}, z512_struc4 = {0}, z512_struc5 = {0}, z512_struc6 = {0};
-  __m512i z512_lit1 = {0}, z512_lit2 = {0}, z512_lit3 = {0}, z512_zero = {0}, z512_nine = {0};
-  __m256i y256_s, y256_t, y256_r, y256_n, y256_q, y256_mv, y256_struc12, y256_struc34, y256_struc56;
-  __m256i y256_struc_r, y256_struc_rb, y256_struc_co, y256_lit1, y256_lit2, y256_lit3, y256_zero, y256_nine, y256_zero_byte;
+  __m512i z512_zero = {0}, z512_nine = {0};
+  __m256i y256_s, y256_t, y256_r, y256_n, y256_q, y256_mv, y256_zero, y256_nine, y256_zero_byte;
   (void)y256_s;
   if (has_avx512) {
     z512_s = _mm512_set1_epi8(' ');
@@ -193,15 +192,6 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     z512_n = _mm512_set1_epi8('\n');
     z512_q = _mm512_set1_epi8('"');
     z512_mv = _mm512_set1_epi8('-');
-    z512_struc1 = _mm512_set1_epi8('{');
-    z512_struc2 = _mm512_set1_epi8('}');
-    z512_struc3 = _mm512_set1_epi8('[');
-    z512_struc4 = _mm512_set1_epi8(']');
-    z512_struc5 = _mm512_set1_epi8(':');
-    z512_struc6 = _mm512_set1_epi8(',');
-    z512_lit1 = _mm512_set1_epi8('t');
-    z512_lit2 = _mm512_set1_epi8('f');
-    z512_lit3 = _mm512_set1_epi8('n');
     z512_zero = _mm512_set1_epi8('0');
     z512_nine = _mm512_set1_epi8(9);
   } else if (has_avx2) {
@@ -211,21 +201,12 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     y256_n = _mm256_set1_epi8('\n');
     y256_q = _mm256_set1_epi8('"');
     y256_mv = _mm256_set1_epi8('-');
-    y256_struc12 = _mm256_set1_epi8('{');
-    y256_struc34 = _mm256_set1_epi8('[');
-    y256_struc56 = _mm256_set1_epi8(':');
-    y256_struc_r = _mm256_set1_epi8('}');
-    y256_struc_rb = _mm256_set1_epi8(']');
-    y256_struc_co = _mm256_set1_epi8(',');
-    y256_lit1 = _mm256_set1_epi8('t');
-    y256_lit2 = _mm256_set1_epi8('f');
-    y256_lit3 = _mm256_set1_epi8('n');
     y256_zero = _mm256_set1_epi8('0');
     y256_nine = _mm256_set1_epi8(9);
     y256_zero_byte = _mm256_set1_epi8(0);
   }
 #elif LIGHTER_PLATFORM_ARM64
-  uint8x16_t vs, vt, vr, vn, vq, vmv, vstruc1, vstruc2, vstruc3, vstruc4, vstruc5, vstruc6, vlit1, vlit2, vlit3, vzero, vnine;
+  uint8x16_t vs, vt, vr, vn, vq, vmv, vzero, vnine;
   if (has_neon) {
     vs = vdupq_n_u8(' ');
     vt = vdupq_n_u8('\t');
@@ -233,15 +214,6 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     vn = vdupq_n_u8('\n');
     vq = vdupq_n_u8('"');
     vmv = vdupq_n_u8('-');
-    vstruc1 = vdupq_n_u8('{');
-    vstruc2 = vdupq_n_u8('}');
-    vstruc3 = vdupq_n_u8('[');
-    vstruc4 = vdupq_n_u8(']');
-    vstruc5 = vdupq_n_u8(':');
-    vstruc6 = vdupq_n_u8(',');
-    vlit1 = vdupq_n_u8('t');
-    vlit2 = vdupq_n_u8('f');
-    vlit3 = vdupq_n_u8('n');
     vzero = vdupq_n_u8('0');
     vnine = vdupq_n_u8('9');
   }
@@ -254,9 +226,6 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
         __m512i c = _mm512_loadu_si512((const void*)p);
         __mmask64 mk = _mm512_cmpeq_epi8_mask(c, z512_s) | _mm512_cmpeq_epi8_mask(c, z512_t) | _mm512_cmpeq_epi8_mask(c, z512_r) |
                        _mm512_cmpeq_epi8_mask(c, z512_n) | _mm512_cmpeq_epi8_mask(c, z512_q) | _mm512_cmpeq_epi8_mask(c, z512_mv) |
-                       _mm512_cmpeq_epi8_mask(c, z512_struc1) | _mm512_cmpeq_epi8_mask(c, z512_struc2) | _mm512_cmpeq_epi8_mask(c, z512_struc3) |
-                       _mm512_cmpeq_epi8_mask(c, z512_struc4) | _mm512_cmpeq_epi8_mask(c, z512_struc5) | _mm512_cmpeq_epi8_mask(c, z512_struc6) |
-                       _mm512_cmpeq_epi8_mask(c, z512_lit1) | _mm512_cmpeq_epi8_mask(c, z512_lit2) | _mm512_cmpeq_epi8_mask(c, z512_lit3) |
                        _mm512_cmp_epu8_mask(_mm512_sub_epi8(c, z512_zero), z512_nine, _MM_CMPINT_LE);
         if (mk != 0) {
           p += __builtin_ctzll(mk);
@@ -267,11 +236,11 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     } else if (has_avx2) {
       while (p + 32 <= data->data_end) {
         __m256i c = _mm256_loadu_si256((const __m256i*)p);
-        __m256i mk = _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_s), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_t), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_r),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_n), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_q), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_mv),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc12), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc34), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc56),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_r), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_rb), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_struc_co),
-                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_lit1), _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_lit2), _mm256_cmpeq_epi8(c, y256_lit3))))))))))))))));
+        __m256i mk = _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_s),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_t),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_r),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_n),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(c, y256_q), _mm256_cmpeq_epi8(c, y256_mv))))));
         mk = _mm256_or_si256(mk, _mm256_cmpeq_epi8(_mm256_subs_epu8(_mm256_sub_epi8(c, y256_zero), y256_nine), y256_zero_byte));
         uint32_t mask = (uint32_t)_mm256_movemask_epi8(mk);
         if (mask != 0) {
@@ -285,35 +254,24 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
     if (has_neon) {
       while (p + 16 <= data->data_end) {
         uint8x16_t c = vld1q_u8(p);
-        uint8x16_t mk = vorrq_u8(
-            vceqq_u8(c, vs),
-            vorrq_u8(
-                vceqq_u8(c, vt),
-                vorrq_u8(vceqq_u8(c, vr),
-                         vorrq_u8(vceqq_u8(c, vn),
-                                  vorrq_u8(vceqq_u8(c, vq),
-                                           vorrq_u8(vceqq_u8(c, vmv),
-                                                    vorrq_u8(vceqq_u8(c, vstruc1),
-                                                             vorrq_u8(vceqq_u8(c, vstruc2),
-                                                                      vorrq_u8(vceqq_u8(c, vstruc3),
-                                                                               vorrq_u8(vceqq_u8(c, vstruc4),
-                                                                                        vorrq_u8(vceqq_u8(c, vstruc5),
-                                                                                                 vorrq_u8(vceqq_u8(c, vstruc6),
-                                                                                                          vorrq_u8(vceqq_u8(c, vlit1),
-                                                                                                                   vorrq_u8(vceqq_u8(c, vlit2),
-                                                                                                                            vceqq_u8(c, vlit3)))))))))))))));
+        uint8x16_t mk = vorrq_u8(vceqq_u8(c, vs),
+                       vorrq_u8(vceqq_u8(c, vt),
+                       vorrq_u8(vceqq_u8(c, vr),
+                       vorrq_u8(vceqq_u8(c, vn),
+                       vorrq_u8(vceqq_u8(c, vq), vceqq_u8(c, vmv))))));
         mk = vorrq_u8(mk, vandq_u8(vcgeq_u8(c, vzero), vcleq_u8(c, vnine)));
+        if (vmaxvq_u8(mk) == 0) {
+          p += 16;
+          continue;
+        }
         uint64x2_t u64 = vreinterpretq_u64_u8(mk);
-        uint64_t low = vgetq_lane_u64(u64, 0), high = vgetq_lane_u64(u64, 1);
-        if (low != 0) {
-          p += (__builtin_ctzll(low) >> 3);
-          break;
+        uint64_t low = vgetq_lane_u64(u64, 0);
+        if (low) {
+          p += __builtin_ctzll(low) >> 3;
+        } else {
+          p += (__builtin_ctzll(vgetq_lane_u64(u64, 1)) >> 3) + 8;
         }
-        if (high != 0) {
-          p += (__builtin_ctzll(high) >> 3) + 8;
-          break;
-        }
-        p += 16;
+        break;
       }
     }
 #elif LIGHTER_PLATFORM_RISCV
@@ -327,15 +285,6 @@ static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, i
         mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '\n', vl), vl);
         mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '"', vl), vl);
         mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '-', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '{', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '}', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, '[', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, ']', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, ':', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, ',', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, 't', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, 'f', vl), vl);
-        mk = __riscv_vmor_mm_b8(mk, __riscv_vmseq_vx_u8m1_b8(c, 'n', vl), vl);
         mk = __riscv_vmor_mm_b8(mk, __riscv_vmand_mm_b8(__riscv_vmsgeu_vx_u8m1_b8(c, '0', vl), __riscv_vmsleu_vx_u8m1_b8(c, '9', vl), vl), vl);
         intptr_t index = __riscv_vfirst_m_b8(mk, vl);
         if (index >= 0) {

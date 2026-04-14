@@ -359,7 +359,6 @@ static void do_object(LighterData* data, LighterContext* ctx, int line_start) {
   while (data->rindex < data->data_end) {
     switch (*data->rindex) {
       case ':':
-        lighter_write_data(data, 0);
         ++(data->rindex);
         lighter_write_data(data, 0);
         return;

@@ -33,7 +33,9 @@ static inline int lighter_has_byte(uint64_t v, uint8_t c) {
 
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */
 static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset) {
-  memmove(data->windex, data->lindex, (size_t)(data->rindex - data->lindex));
+  if (data->windex != data->lindex) {
+    memmove(data->windex, data->lindex, (size_t)(data->rindex - data->lindex));
+  }
   data->windex += data->rindex - data->lindex;
   data->rindex += index_offset;
   data->lindex = data->rindex;
@@ -42,7 +44,11 @@ static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset)
 /** Portable signed 64-bit addition overflow check. */
 #if defined(__GNUC__) || defined(__clang__)
   #define LIGHTER_ADD_OVERFLOW(a, b, res) __builtin_add_overflow(a, b, res)
+  #define LIGHTER_LIKELY(x) __builtin_expect(!!(x), 1)
+  #define LIGHTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
+  #define LIGHTER_LIKELY(x) (x)
+  #define LIGHTER_UNLIKELY(x) (x)
 static inline int LIGHTER_ADD_OVERFLOW(int64_t a, int64_t b, int64_t* res) {
   if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
     return 1;

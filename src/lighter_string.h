@@ -26,25 +26,36 @@
 #define SURROGATE_MASK 0x3FFu
 #define SURROGATE_OFFSET 0x10000u
 
+static const uint8_t lighter_hex_table[64] = {
+    0,    1,    2,    3,    4,    5,    6,    7,    8,    9,    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, /* 0-9, :;<=>? */
+    0x80, 10,   11,   12,   13,   14,   15,   0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, /* @, A-F, G-O */
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, /* P-Z, [\]^_ */
+    0x80, 10,   11,   12,   13,   14,   15,   0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80  /* `, a-f, g-o */
+};
+
 static inline uint64_t lighter_string_hex_value(LighterData* data) {
-  uint64_t value = 0;
   if (data->rindex + UNICODE_ESCAPE_HEX_LEN > data->data_end) {
     return (uint64_t)INT64_MAX;
   }
-  for (size_t i = 0; i < UNICODE_ESCAPE_HEX_LEN; ++i) {
-    const uint64_t x = data->rindex[i];
-    const uint64_t shift = (UNICODE_ESCAPE_HEX_LEN - 1 - i) << 2;
-    if (x >= '0' && x <= '9') {
-      value += ((x - '0') << shift);
-    } else if (x >= 'A' && x <= 'F') {
-      value += ((x - 'A' + 10) << shift);
-    } else if (x >= 'a' && x <= 'f') {
-      value += ((x - 'a' + 10) << shift);
-    } else {
-      return (uint64_t)INT64_MAX;
-    }
+  const uint8_t x0 = data->rindex[0] - '0';
+  const uint8_t x1 = data->rindex[1] - '0';
+  const uint8_t x2 = data->rindex[2] - '0';
+  const uint8_t x3 = data->rindex[3] - '0';
+
+  if ((x0 | x1 | x2 | x3) & 0xC0) {
+    return (uint64_t)INT64_MAX;
   }
-  return value;
+
+  const uint8_t v0 = lighter_hex_table[x0];
+  const uint8_t v1 = lighter_hex_table[x1];
+  const uint8_t v2 = lighter_hex_table[x2];
+  const uint8_t v3 = lighter_hex_table[x3];
+
+  if ((v0 | v1 | v2 | v3) & 0x80) {
+    return (uint64_t)INT64_MAX;
+  }
+
+  return (uint64_t)((v0 << 12) | (v1 << 8) | (v2 << 4) | v3);
 }
 
 static inline void lighter_string_do_unicode(LighterData* data) {

@@ -20,12 +20,10 @@
   #define NFC_UNUSED
 #endif
 
-/* Check that offset + len <= size with no overflow. */
+/** Return non-zero when [offset, offset + len) fits within size without overflow. */
 static inline int nfc_bounds_ok(size_t offset, size_t len, size_t size) {
   return len <= size && offset <= size - len;
 }
-
-/* ── Constants ─────────────────────────────────────────────────────── */
 
 #define NFC_MAX_CP 0x110000u
 #define NFC_BLOCK_SHIFT 8
@@ -39,9 +37,8 @@ typedef enum {
   NFC_QC_NO = 2,
 } NfcQc;
 
-/* Usual textual behavior: NFC-sensitive runs are typically short (base char + a
- * few combining marks). Keep the common path stack-only and fall back to heap
- * only when a segment is unusually long. */
+/* Stack capacity for the common normalization path; longer segments use heap
+ * fallback in the runtime normalizer. */
 #define NFC_SEG_STACK_MAX 64
 #define NFC_DECOMP_STACK_MAX 128
 #define NFC_SEG_MAX NFC_SEG_STACK_MAX
@@ -104,17 +101,17 @@ typedef struct {
   size_t decomp_data_len;
   NfcCompEntry* comp_table;
   size_t comp_size;
-  uint8_t* ccc_dense;
-  uint8_t* qc_dense;
   NfcCompEntry* comp_hash;
   size_t comp_hash_cap;
   LighterMap map; /* read-only mapping for binary loader; kept for lifetime of NfcData */
 } NfcData;
 
+/** Read the code point field from the i-th sparse decomposition entry. */
 static inline uint32_t nfc_decomp_sparse_cp(const NfcData* d, size_t i) {
   const uint8_t* p = d->decomp_sparse + (i * (size_t)NFC_DECOMP_SPARSE_ENTRY_BYTES);
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
 }
+/** Read the decomposition index field from the i-th sparse entry. */
 static inline uint32_t nfc_decomp_sparse_idx(const NfcData* d, size_t i) {
   const uint8_t* p = d->decomp_sparse + (i * (size_t)NFC_DECOMP_SPARSE_ENTRY_BYTES) + 3;
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);

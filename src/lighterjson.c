@@ -40,11 +40,10 @@
 #include "lighter_cpu.h"
 #include "lighter_memmap.h"
 #include "lighter_number.h"
-#include "lighter_simd.h"
 #include "lighter_string.h"
 #include "lighter_transcode.h"
 
-typedef struct LighterContext {
+typedef struct Context {
   int64_t precision;
   int quiet;
   int newlines;
@@ -55,29 +54,28 @@ typedef struct LighterContext {
   int has_avx2;
   int has_neon;
   int has_rvv;
-} LighterContext;
+} Context;
 
 typedef struct PathBuffer {
   char* buf;
   size_t cap;
 } PathBuffer;
 
-static int do_file(LighterContext* ctx, char filename[]);
-static int do_dir(LighterContext* ctx, PathBuffer* pb);
-static void do_string(LighterData* data, LighterContext* ctx);
-static void do_object(LighterData* data, LighterContext* ctx, int line_start);
-static void do_number(LighterData* data, LighterContext* ctx);
+#define LIGHTER_PATH_BUFFER_INITIAL_CAPACITY 4096u
+#define LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR 3u
+#define LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR 2u
+#define LIGHTER_TRANSCODE_SLACK_BYTES 4u
+#define LIGHTER_BOUNDARY_BASE 0x09u
+#define LIGHTER_BOUNDARY_MASK_BITS 64u
 
+/** Advance run past a contiguous whitespace span, using SIMD when worthwhile. */
 static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   (void)has_avx512;
   (void)has_avx2;
   (void)has_neon;
   (void)has_rvv;
-  /* Fast path: most whitespace runs are short (1-2 bytes between tokens in minified-ish
-   * JSON, single space after ':' or ','). Try scalar for a few bytes first; if we're
-   * still scanning past that, pivot to SIMD for the long-run case (pretty-printed JSON
-   * with heavy indentation). Threshold chosen so we don't pay SIMD setup cost for short
-   * runs, but get to SIMD quickly for long indentation. */
+  /* Use a short scalar prefix before the SIMD scan so brief whitespace runs are
+   * handled without the full vector setup cost. */
   const uint64_t ws_mask =
       include_newline ? ((1ULL << ' ') | (1ULL << '\t') | (1ULL << '\n') | (1ULL << '\r')) : ((1ULL << ' ') | (1ULL << '\t') | (1ULL << '\r'));
   uint8_t* fast_end = run + 2;
@@ -184,11 +182,13 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
   return run;
 }
 
-void skip_whitespace_run(LighterData* data, int include_newline, LighterContext* ctx) {
+/** Skip the whitespace run at rindex and flush any preceding output. */
+void skip_whitespace_run(LighterData* data, int include_newline, Context* ctx) {
   uint8_t* run = skip_whitespace_impl(data->rindex, data->data_end, include_newline, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
   lighter_write_data(data, run - data->rindex);
 }
 
+/** Consume literal when it matches at rindex, or copy one byte through on mismatch. */
 void do_literal(LighterData* data, const char* literal, size_t length) {
   if (data->rindex + length <= data->data_end && memcmp(data->rindex, literal, length) == 0) {
     data->rindex += length;
@@ -197,81 +197,18 @@ void do_literal(LighterData* data, const char* literal, size_t length) {
   }
 }
 
-static inline void do_value_handle_byte(LighterData* data, LighterContext* ctx, int* line_start) {
-  uint8_t c = *data->rindex;
-  if (c == '"') {
-    do_string(data, ctx);
-  } else if (c == '-' || ((unsigned)(c - '0') <= 9)) {
-    do_number(data, ctx);
-  } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-    if (c == '\n') {
-      if (*line_start == 1) {
-        --(*line_start);
-      } else if (*line_start == 2) {
-        ++(data->rindex);
-      } else {
-        skip_whitespace_run(data, 1, ctx);
-      }
-    } else {
-      skip_whitespace_run(data, *line_start ? 0 : 1, ctx);
-    }
-  } else {
-    ++(data->rindex);
-  }
-}
-
-static inline void do_value_blind_impl(LighterData* data, LighterContext* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  /* Scan for the next "interesting" byte: whitespace, '"', '-', or a digit.
-   * Everything else (structural {}[]:, and literals tfn) is a no-op in the scalar
-   * dispatcher, so we just advance past it.
-   *
-   * Branchless membership test via shift+bitmask: all interesting bytes fall in
-   * [0x09, 0x39] (a range of 49), so we rebase to c - 0x09, bounds-check against 49,
-   * then test against a 64-bit mask of the rebased indices. This is 3× faster than
-   * the 7-way if-chain in isolation (single shift + AND vs several compares + branches)
-   * and avoids cache pressure from a 256-byte LUT.
-   *
-   * A SIMD pre-scan was tried but was a net loss: interesting bytes are dense
-   * (~every 1-3 bytes), so SIMD register setup costs more than a byte loop.
-   * Whitespace runs are still SIMD-accelerated via skip_whitespace_run. */
-  (void)has_avx512;
-  (void)has_avx2;
-  (void)has_neon;
-  (void)has_rvv;
-  /* Mask bits for rebased positions (c - 0x09) of each target byte. */
-  const uint64_t boundary_mask = (1ULL << (0x09 - 9)) | (1ULL << (0x0A - 9)) | (1ULL << (0x0D - 9)) | (1ULL << (0x20 - 9)) | (1ULL << (0x22 - 9)) |
-                                 (1ULL << (0x2D - 9)) | (1ULL << (0x30 - 9)) | (1ULL << (0x31 - 9)) | (1ULL << (0x32 - 9)) | (1ULL << (0x33 - 9)) |
-                                 (1ULL << (0x34 - 9)) | (1ULL << (0x35 - 9)) | (1ULL << (0x36 - 9)) | (1ULL << (0x37 - 9)) | (1ULL << (0x38 - 9)) |
-                                 (1ULL << (0x39 - 9));
-  const uint8_t* end = data->data_end;
-  while (data->rindex < end) {
-    uint8_t* p = data->rindex;
-    while (p < end) {
-      uint8_t d = (uint8_t)(*p - 0x09);
-      /* Rebased to [0, 48]; wider range fails the bit test naturally because boundary_mask
-       * has no bits set above 48. Guard against shift-by-large-value (UB for shift >= 64). */
-      if (d < 64 && ((boundary_mask >> d) & 1ULL)) {
-        break;
-      }
-      ++p;
-    }
-    data->rindex = p;
-    if (data->rindex >= end) {
-      return;
-    }
-    do_value_handle_byte(data, ctx, &line_start);
-  }
-}
-
-static void do_string(LighterData* data, LighterContext* ctx) {
+/** Dispatch JSON string parsing with the current context flags. */
+static void do_string(LighterData* data, Context* ctx) {
   lighter_do_string(data, ctx->disable_nfc, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
-static void do_number(LighterData* data, LighterContext* ctx) {
+/** Dispatch JSON number parsing with the current precision and CPU flags. */
+static void do_number(LighterData* data, Context* ctx) {
   lighter_do_number_impl(data, ctx->precision, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
-static int do_object_label(LighterData* data, LighterContext* ctx, int line_start) {
+/** Parse an object key or detect the end of the current object. */
+static int do_object_label(LighterData* data, Context* ctx, int line_start) {
   while (data->rindex < data->data_end) {
     switch (*data->rindex) {
       case '"':
@@ -297,7 +234,8 @@ static int do_object_label(LighterData* data, LighterContext* ctx, int line_star
   return 1;
 }
 
-static void do_object(LighterData* data, LighterContext* ctx, int line_start) {
+/** Parse object punctuation after a key and position the reader at the value. */
+static void do_object(LighterData* data, Context* ctx, int line_start) {
   if (do_object_label(data, ctx, line_start)) {
     return;
   }
@@ -324,7 +262,72 @@ static void do_object(LighterData* data, LighterContext* ctx, int line_start) {
   }
 }
 
-static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
+/** Handle one structural byte reached by the blind value scanner. */
+static inline void do_value_handle_byte(LighterData* data, Context* ctx, int* line_start) {
+  uint8_t c = *data->rindex;
+  if (c == '"') {
+    do_string(data, ctx);
+  } else if (c == '-' || ((unsigned)(c - '0') <= 9)) {
+    do_number(data, ctx);
+  } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+    if (c == '\n') {
+      if (*line_start == 1) {
+        --(*line_start);
+      } else if (*line_start == 2) {
+        ++(data->rindex);
+      } else {
+        skip_whitespace_run(data, 1, ctx);
+      }
+    } else {
+      skip_whitespace_run(data, *line_start ? 0 : 1, ctx);
+    }
+  } else {
+    ++(data->rindex);
+  }
+}
+
+/** Fast-path value scan for non-safe mode. */
+static inline void do_value_blind_impl(LighterData* data, Context* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  /* Scan for the next "interesting" byte: whitespace, '"', '-', or a digit.
+   * Everything else (structural {}[]:, and literals tfn) is a no-op in the scalar
+   * dispatcher, so this loop advances until one of those bytes is found.
+   *
+   * Membership uses a rebased 64-bit bitmask over the byte range [0x09, 0x39].
+   * Whitespace runs are handled separately by skip_whitespace_run. */
+  (void)has_avx512;
+  (void)has_avx2;
+  (void)has_neon;
+  (void)has_rvv;
+  /* Mask bits for rebased positions (c - 0x09) of each target byte. */
+  const uint64_t boundary_mask = (1ULL << ('\t' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('\n' - LIGHTER_BOUNDARY_BASE)) |
+                                 (1ULL << ('\r' - LIGHTER_BOUNDARY_BASE)) | (1ULL << (' ' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('"' - LIGHTER_BOUNDARY_BASE)) |
+                                 (1ULL << ('-' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('0' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('1' - LIGHTER_BOUNDARY_BASE)) |
+                                 (1ULL << ('2' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('3' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('4' - LIGHTER_BOUNDARY_BASE)) |
+                                 (1ULL << ('5' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('6' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('7' - LIGHTER_BOUNDARY_BASE)) |
+                                 (1ULL << ('8' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('9' - LIGHTER_BOUNDARY_BASE));
+  const uint8_t* end = data->data_end;
+  while (data->rindex < end) {
+    uint8_t* p = data->rindex;
+    while (p < end) {
+      uint8_t d = (uint8_t)(*p - LIGHTER_BOUNDARY_BASE);
+      /* Rebased to the boundary-mask range; wider values fail the bit test
+       * naturally because boundary_mask has no bits set above it. Guard against
+       * shift-by-large-value (UB for shift >= LIGHTER_BOUNDARY_MASK_BITS). */
+      if (d < LIGHTER_BOUNDARY_MASK_BITS && ((boundary_mask >> d) & 1ULL)) {
+        break;
+      }
+      ++p;
+    }
+    data->rindex = p;
+    if (data->rindex >= end) {
+      return;
+    }
+    do_value_handle_byte(data, ctx, &line_start);
+  }
+}
+
+/** Parse values from the current position, optionally with structural recovery. */
+static int do_value(LighterData* data, Context* ctx, int line_start) {
   if (!ctx->safe_mode) {
     do_value_blind_impl(data, ctx, line_start, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
     return 0;
@@ -407,7 +410,7 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
         switch (line_start) {
           case 1:
             --line_start;
-            // fallthrough
+            /* fall through */
           case 2:
             ++(data->rindex);
             break;
@@ -420,7 +423,7 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
       case '\r':
         skip_whitespace_run(data, line_start ? 0 : 1, ctx);
         break;
-      default:  // invalid
+      default: /* invalid */
         lighter_write_data(data, 1);
     }
   }
@@ -430,16 +433,119 @@ static int do_value(LighterData* data, LighterContext* ctx, int line_start) {
   return 0;
 }
 
-/* Return 1 if filename should be processed: .json always; .jsonl/.ndjson when
- * in NDJSON mode. */
-static int dir_should_process(LighterContext* ctx, const char* name) {
+/** Return non-zero when name should be processed for the current mode. */
+static int dir_should_process(Context* ctx, const char* name) {
   size_t len = strlen(name);
   return (len >= 5 && strcmp(name + len - 5, ".json") == 0) ||
          (ctx->newlines && ((len >= 6 && strcmp(name + len - 6, ".jsonl") == 0) || (len >= 7 && strcmp(name + len - 7, ".ndjson") == 0)));
 }
 
+/** Open, minify, and rewrite one JSON file in place. */
+static int do_file(Context* ctx, char filename[]) {
+  LighterMap map = {0};
+  size_t map_capacity;
+  if (lighter_map_open(&map, filename, 0) != 0) {
+    return EXIT_FAILURE;
+  }
+  map_capacity = map.size;
+  if (!ctx->quiet) {
+    printf("%s: ", filename);
+  }
+  LighterEncoding orig_encoding = lighter_detect_encoding(map.data, map.size);
+  size_t bom_size = lighter_encoding_bom_size(orig_encoding, map.data, map.size);
+  size_t actual_size = map.size - bom_size;
+  size_t orig_file_size = map.size; /* preserve for final savings report */
+
+  if (orig_encoding != LIGHTER_ENC_UTF8) {
+    size_t max_utf8 = (orig_encoding == LIGHTER_ENC_UTF16LE || orig_encoding == LIGHTER_ENC_UTF16BE)
+                          ? (actual_size * LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR / LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR) + LIGHTER_TRANSCODE_SLACK_BYTES
+                          : actual_size + LIGHTER_TRANSCODE_SLACK_BYTES;
+    uint8_t* old_data = NULL;
+    size_t old_size_full = 0;
+
+    if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
+      fprintf(stderr, "Could not expand file for transcoding\n");
+      lighter_map_close(&map);
+      return EXIT_FAILURE;
+    }
+
+    uint8_t* transcode_src;
+    if (old_data) {
+      transcode_src = old_data + bom_size;
+    } else {
+      /* Windows fallback: move to end of new mapping to avoid overlap issues */
+      memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
+      transcode_src = map.data + max_utf8 - actual_size;
+    }
+
+    size_t utf8_size;
+    lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_encoding, &utf8_size);
+    map.size = utf8_size;
+    map_capacity = max_utf8;
+
+    if (old_data) {
+      lighter_map_unmap(old_data, old_size_full);
+    }
+    bom_size = 0; /* BOM was already stripped during transcoding */
+  }
+  /* For UTF-8 with a BOM, leave map.size alone; rindex starts past the BOM so the
+   * source range is [map.data + bom_size, map.data + map.size). data_start stays at
+   * map.data so windex can overwrite the BOM with minified content. */
+
+  LighterData data;
+  data.data_start = map.data;
+  data.windex = map.data;
+  data.data_end = map.data + map.size;
+  data.rindex = map.data + bom_size;
+  data.lindex = data.rindex;
+
+  int exit_code = EXIT_SUCCESS;
+  do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0); /* clean up leading newlines in -N mode */
+  if (ctx->newlines) {
+    while (data.rindex < data.data_end) {
+      do_value(&data, ctx, ctx->newlines);
+    }
+  }
+  lighter_write_data(&data, 0);
+  if (ctx->newlines == 1 && data.windex > data.data_start && *(data.windex - 1) == '\n') {
+    --(data.windex); /* clean up trailing newline in -n mode */
+  }
+
+  size_t written = (size_t)(data.windex - data.data_start);
+  if (orig_encoding != LIGHTER_ENC_UTF8 && written > 0) {
+    size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
+    if ((written > back_size ? written : back_size) > map_capacity) {
+      fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+      lighter_map_close(&map);
+      return EXIT_FAILURE;
+    }
+    /* BOM is stripped; transcode preserves the original byte order. Byte order is
+     * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
+    lighter_transcode_from_utf8_backward(data.data_start, written, orig_encoding, map.data + back_size);
+    written = back_size;
+  }
+
+  if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {
+    fprintf(stderr, "Could not sync file\n");
+    exit_code = EXIT_FAILURE;
+  }
+  if (exit_code == EXIT_SUCCESS && written > 0 && lighter_map_truncate(&map, written) != 0) {
+    fprintf(stderr, "Could not truncate file. It may have garbage at the end\n");
+  }
+
+  lighter_map_close(&map);
+  if (!ctx->quiet && orig_file_size > written) {
+    printf("Saved %lu bytes\n", (unsigned long)(orig_file_size - written));
+  } else if (!ctx->quiet) {
+    printf("Saved 0 bytes\n");
+  }
+  return exit_code;
+}
+
 #if LIGHTER_PLATFORM_WIN
-static int do_dir_win(LighterContext* ctx, PathBuffer* pb) {
+/** Recursively process one directory on Windows. */
+static int do_dir_win(Context* ctx, PathBuffer* pb) {
+  int exit_code = EXIT_SUCCESS;
   size_t plen = strlen(pb->buf);
   wchar_t* long_wpath = lighter_make_long_path_w(pb->buf);
   if (!long_wpath) {
@@ -502,20 +608,27 @@ static int do_dir_win(LighterContext* ctx, PathBuffer* pb) {
     }
 
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      do_dir_win(ctx, pb);
+      if (do_dir_win(ctx, pb) != EXIT_SUCCESS) {
+        exit_code = EXIT_FAILURE;
+      }
     } else if (dir_should_process(ctx, pb->buf)) {
-      do_file(ctx, pb->buf);
+      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
+        exit_code = EXIT_FAILURE;
+      }
     }
     pb->buf[plen] = '\0';
   } while (FindNextFileW(h, &fd));
   FindClose(h);
-  return EXIT_SUCCESS;
+  return exit_code;
 }
-static int do_dir(LighterContext* ctx, PathBuffer* pb) {
+/** Dispatch directory processing through the Windows walker. */
+static int do_dir(Context* ctx, PathBuffer* pb) {
   return do_dir_win(ctx, pb);
 }
 #else
-static int do_dir(LighterContext* ctx, PathBuffer* pb) {
+/** Recursively process one directory on POSIX platforms. */
+static int do_dir(Context* ctx, PathBuffer* pb) {
+  int exit_code = EXIT_SUCCESS;
   DIR* dir = opendir(pb->buf);
   if (!dir) {
     fprintf(stderr, "Could not open %s: %s\n", pb->buf, strerror(errno));
@@ -549,116 +662,22 @@ static int do_dir(LighterContext* ctx, PathBuffer* pb) {
     }
 
     if (entry->d_type == DT_DIR) {
-      do_dir(ctx, pb);
+      if (do_dir(ctx, pb) != EXIT_SUCCESS) {
+        exit_code = EXIT_FAILURE;
+      }
     } else if (dir_should_process(ctx, pb->buf)) {
-      do_file(ctx, pb->buf);
+      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
+        exit_code = EXIT_FAILURE;
+      }
     }
     pb->buf[plen] = '\0';
   }
   closedir(dir);
-  return EXIT_SUCCESS;
+  return exit_code;
 }
 #endif
 
-static int do_file(LighterContext* ctx, char filename[]) {
-  LighterMap map = {0};
-  if (lighter_map_open(&map, filename, 0) != 0) {
-    return EXIT_FAILURE;
-  }
-  if (!ctx->quiet) {
-    printf("%s: ", filename);
-  }
-  LighterEncoding orig_enc = lighter_detect_encoding(map.data, map.size);
-  size_t bom_size = lighter_encoding_bom_size(orig_enc, map.data, map.size);
-  size_t actual_size = map.size - bom_size;
-  size_t orig_file_size = map.size; /* preserve for final savings report */
-
-  if (orig_enc != LIGHTER_ENC_UTF8) {
-    size_t max_utf8 = (orig_enc == LIGHTER_ENC_UTF16LE || orig_enc == LIGHTER_ENC_UTF16BE) ? (actual_size * 3 / 2) + 4 : actual_size + 4;
-    uint8_t* old_data = NULL;
-    size_t old_size_full = 0;
-
-    if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
-      fprintf(stderr, "Could not expand file for transcoding\n");
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
-    }
-
-    uint8_t* transcode_src;
-    if (old_data) {
-      transcode_src = old_data + bom_size;
-    } else {
-      /* Windows fallback: move to end of new mapping to avoid overlap issues */
-      memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
-      transcode_src = map.data + max_utf8 - actual_size;
-    }
-
-    size_t utf8_size;
-    lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_enc, &utf8_size);
-    map.size = utf8_size;
-
-    if (old_data) {
-      lighter_map_unmap(old_data, old_size_full);
-    }
-    bom_size = 0; /* BOM was already stripped during transcoding */
-  }
-  /* For UTF-8 with a BOM, leave map.size alone; rindex starts past the BOM so the
-   * source range is [map.data + bom_size, map.data + map.size). data_start stays at
-   * map.data so windex can overwrite the BOM with minified content. */
-
-  LighterData data;
-  data.data_start = map.data;
-  data.windex = map.data;
-  data.data_end = map.data + map.size;
-  data.rindex = map.data + bom_size;
-  data.lindex = data.rindex;
-
-  int exit_code = EXIT_SUCCESS;
-  do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0); /* clean up leading newlines in -N mode */
-  if (ctx->newlines) {
-    while (data.rindex < data.data_end) {
-      do_value(&data, ctx, ctx->newlines);
-    }
-  }
-  lighter_write_data(&data, 0);
-  if (ctx->newlines == 1 && data.windex > data.data_start && *(data.windex - 1) == '\n') {
-    --(data.windex); /* clean up trailing newline in -n mode */
-  }
-
-  size_t written = (size_t)(data.windex - data.data_start);
-  if (orig_enc != LIGHTER_ENC_UTF8 && written > 0) {
-    uint8_t* temp_utf8 = (uint8_t*)malloc(written);
-    if (!temp_utf8) {
-      fprintf(stderr, "Out of memory re-transcoding %s\n", filename);
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
-    }
-    memcpy(temp_utf8, data.data_start, written);
-    size_t back_size;
-    /* BOM is stripped; transcode preserves the original byte order. Byte order is
-     * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
-    lighter_transcode_from_utf8(temp_utf8, written, orig_enc, map.data, &back_size);
-    written = back_size;
-    free(temp_utf8);
-  }
-
-  if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {
-    fprintf(stderr, "Could not sync file\n");
-    exit_code = EXIT_FAILURE;
-  }
-  if (exit_code == EXIT_SUCCESS && written > 0 && lighter_map_truncate(&map, written) != 0) {
-    fprintf(stderr, "Could not truncate file. It may have garbage at the end\n");
-  }
-
-  lighter_map_close(&map);
-  if (!ctx->quiet && orig_file_size > written) {
-    printf("Saved %lu bytes\n", (unsigned long)(orig_file_size - written));
-  } else if (!ctx->quiet) {
-    printf("Saved 0 bytes\n");
-  }
-  return exit_code;
-}
-
+/** Print command-line usage and exit with status. */
 void usage(char progname[], int status) {
   fprintf(status == EXIT_SUCCESS ? stdout : stderr,
           "Usage: %s [options] path\n"
@@ -675,9 +694,10 @@ void usage(char progname[], int status) {
   exit(status);
 }
 
+/** Parse command-line options and process the requested file or directory. */
 int main(int argc, char* argv[]) {
   int negative = 0;
-  LighterContext ctx = {
+  Context ctx = {
       .precision = LIGHTER_PRECISION_UNLIMITED,
       .quiet = 0,
       .newlines = 0,
@@ -793,7 +813,7 @@ int main(int argc, char* argv[]) {
   }
   if (att != INVALID_FILE_ATTRIBUTES && (att & FILE_ATTRIBUTE_DIRECTORY)) {
     PathBuffer pb;
-    pb.cap = 4096;
+    pb.cap = LIGHTER_PATH_BUFFER_INITIAL_CAPACITY;
     size_t arg_len = strlen(argv[optind_val]);
     if (arg_len + 1 > pb.cap) {
       pb.cap = arg_len + 1;
@@ -811,7 +831,7 @@ int main(int argc, char* argv[]) {
   struct stat sb;
   if (stat(argv[optind_val], &sb) == 0 && (sb.st_mode & S_IFDIR)) {
     PathBuffer pb;
-    pb.cap = 4096;
+    pb.cap = LIGHTER_PATH_BUFFER_INITIAL_CAPACITY;
     size_t arg_len = strlen(argv[optind_val]);
     if (arg_len + 1 > pb.cap) {
       pb.cap = arg_len + 1;

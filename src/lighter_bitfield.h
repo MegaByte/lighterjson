@@ -26,6 +26,7 @@ typedef enum Container {
   Object
 } Container;
 
+/** Initialize the bit stack with the embedded first storage word. */
 static inline void init_bits(Bitfield* bitfield) {
   bitfield->size = 1; /* number of uint64_t elements */
   bitfield->initial_bits = 0;
@@ -37,6 +38,7 @@ static inline void init_bits(Bitfield* bitfield) {
 
 /* bit_level/byte_level point at the NEXT free slot. After push, the most recently
  * written bit is at (prev position). `current` caches that bit. Empty stack has current=-1. */
+/** Advance the stack cursor by one bit, growing storage if needed. */
 static inline void increment_bit(Bitfield* bitfield) {
   if (bitfield->bit_level == sizeof(uint64_t) * CHAR_BIT - 1) {
     bitfield->bit_level = 0;
@@ -69,18 +71,21 @@ static inline void increment_bit(Bitfield* bitfield) {
   }
 }
 
+/** Push a set bit onto the stack. */
 static inline void push_set_bit(Bitfield* bitfield) {
   bitfield->current = 1;
   bitfield->bits[bitfield->byte_level] |= (1ULL << bitfield->bit_level);
   increment_bit(bitfield);
 }
 
+/** Push a clear bit onto the stack. */
 static inline void push_clear_bit(Bitfield* bitfield) {
   bitfield->current = 0;
   bitfield->bits[bitfield->byte_level] &= ~(1ULL << bitfield->bit_level);
   increment_bit(bitfield);
 }
 
+/** Pop the most recently pushed bit from the stack. */
 static inline void pop_bit(Bitfield* bitfield) {
   /* Move back one position. */
   if (bitfield->bit_level == 0) {

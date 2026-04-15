@@ -1,6 +1,6 @@
 /**
  * @file   lighter_common.h
- * @brief  Shared types for lighter library modules (string, number).
+ * @brief  Shared data structures and helpers for parser modules.
  */
 
 #ifndef LIGHTER_COMMON_H
@@ -22,15 +22,6 @@ typedef struct LighterData {
   uint8_t* data_end;
 } LighterData;
 
-static inline int lighter_has_zero_byte(uint64_t v) {
-  return ((v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL) != 0;
-}
-
-static inline int lighter_has_byte(uint64_t v, uint8_t c) {
-  uint64_t mask = 0x0101010101010101ULL * c;
-  return lighter_has_zero_byte(v ^ mask);
-}
-
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */
 static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset) {
   ptrdiff_t pending = data->rindex - data->lindex;
@@ -44,15 +35,47 @@ static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset)
   data->lindex = data->rindex;
 }
 
+/** Return non-zero when cp is a valid Unicode scalar value. */
+static inline int lighter_is_unicode_scalar(uint32_t cp) {
+  return cp <= 0x10FFFFu && (cp < 0xD800u || cp > 0xDFFFu);
+}
+
+/** Encode one Unicode scalar into UTF-8 and return the updated dst pointer. */
+static inline uint8_t* lighter_write_utf8_scalar(uint8_t* dst, uint32_t cp) {
+  if (!lighter_is_unicode_scalar(cp)) {
+    return dst;
+  }
+  if (cp < 0x80u) {
+    *dst++ = (uint8_t)cp;
+    return dst;
+  }
+  if (cp < 0x800u) {
+    *dst++ = (uint8_t)(0xC0u | (cp >> 6));
+    *dst++ = (uint8_t)(0x80u | (cp & 0x3Fu));
+    return dst;
+  }
+  if (cp < 0x10000u) {
+    *dst++ = (uint8_t)(0xE0u | (cp >> 12));
+    *dst++ = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+    *dst++ = (uint8_t)(0x80u | (cp & 0x3Fu));
+    return dst;
+  }
+  *dst++ = (uint8_t)(0xF0u | (cp >> 18));
+  *dst++ = (uint8_t)(0x80u | ((cp >> 12) & 0x3Fu));
+  *dst++ = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+  *dst++ = (uint8_t)(0x80u | (cp & 0x3Fu));
+  return dst;
+}
+
 /** Portable signed 64-bit addition overflow check. */
 #if defined(__GNUC__) || defined(__clang__)
-  #define LIGHTER_ADD_OVERFLOW(a, b, res) __builtin_add_overflow(a, b, res)
+  #define lighter_add_overflow(a, b, res) __builtin_add_overflow(a, b, res)
   #define LIGHTER_LIKELY(x) __builtin_expect(!!(x), 1)
   #define LIGHTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
   #define LIGHTER_LIKELY(x) (x)
   #define LIGHTER_UNLIKELY(x) (x)
-static inline int LIGHTER_ADD_OVERFLOW(int64_t a, int64_t b, int64_t* res) {
+static inline int lighter_add_overflow(int64_t a, int64_t b, int64_t* res) {
   if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
     return 1;
   }

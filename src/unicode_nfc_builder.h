@@ -10,6 +10,7 @@
 
 #include "unicode_nfc_shared.h"
 
+/** Parse one hexadecimal code point field from a UCD line. */
 static int nfc_parse_hex(const char* s, uint32_t* cp) {
   *cp = 0;
   int i = 0;
@@ -44,34 +45,26 @@ static const char* nfc_skip_ws(const char* s) {
 
 /* ── Trie builder ──────────────────────────────────────────────────── */
 
+/** Compress one stage-2 table with row-displacement packing. */
 static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks, uint8_t def_val, uint16_t** offsets, uint8_t** val, uint8_t** chk) {
-  /* Row Displacement Compression */
-  /* Estimate size: at least blocks * 256? No, usually much smaller. Start big
-   * then realloc? */
-  /* Upper bound: linear size */
+  /* Row displacement compression with a linear upper bound for the packed pool. */
   size_t pool_cap = (size_t)blocks * NFC_BLOCK_SIZE;
   *val = (uint8_t*)calloc(pool_cap, 1);
   *chk = (uint8_t*)malloc(pool_cap);
-  memset(*chk, 0xFF, pool_cap); /* Init check with 0xFF (invalid block) */
+  memset(*chk, 0xFF, pool_cap); /* Initialize the check array to "invalid block". */
   *offsets = (uint16_t*)calloc(blocks, sizeof(uint16_t));
 
-  /* Sort blocks by density (heuristic: just process all) */
-  /* For optimal packing we should sort, but random order is often fine. */
-  /* We process block 0 first (assumed empty/default) -> always at offset 0? */
-  /* No, simple greedy. */
-
-  size_t max_idx = 0;
+  /* Pack blocks with a greedy first-fit pass. */
 
   for (uint16_t b = 0; b < blocks; ++b) {
     const uint8_t* blk_data = stage2_raw + (size_t)b * NFC_BLOCK_SIZE;
-    /* Find offset */
+    /* Find the first offset where every non-default byte can fit. */
     size_t off = 0;
     while (1) {
-      /* fits? */
       int fits = 1;
       for (int i = 0; i < NFC_BLOCK_SIZE; ++i) {
-        if (blk_data[i] != def_val) {    /* Non-default value needs empty slot */
-          if ((*chk)[off + i] != 0xFF) { /* Slot occupied */
+        if (blk_data[i] != def_val) {    /* Non-default values need an empty slot. */
+          if ((*chk)[off + i] != 0xFF) { /* This slot is already occupied. */
             fits = 0;
             break;
           }
@@ -84,41 +77,20 @@ static void nfc_compress_stage2(uint8_t* stage2_raw, uint16_t blocks, uint8_t de
     }
 
     (*offsets)[b] = (uint16_t)off;
-    /* Place */
+    /* Place the block at the chosen offset. */
     for (int i = 0; i < NFC_BLOCK_SIZE; ++i) {
       if (blk_data[i] != def_val) {
         (*val)[off + i] = blk_data[i];
         (*chk)[off + i] = (uint8_t)b;
-        if (off + i > max_idx) {
-          max_idx = off + i;
-        }
       }
     }
   }
 
-  /* Trim arrays */
-  /* We need max_idx + 1 (size) */
-  /* But also, check array needs to answer "No" for unmapped. */
-  /* If we access [off + 255] and it's beyond max_idx? Memory safe? */
-  /* We must ensure allocated size covers max(offsets) + 256. */
-  size_t needed = 0;
-  for (uint16_t b = 0; b < blocks; ++b) {
-    size_t end = (*offsets)[b] + NFC_BLOCK_SIZE;
-    if (end > needed) {
-      needed = end;
-    }
-  }
-  /* Fill rest with default? Check should be invalid. */
-  /* already 0xFF */
-  /* Realloc? */
-  // *val = realloc(*val, needed); // optional
-  // *chk = realloc(*chk, needed);
-  /* We can rely on mmap/padding for robustness, but here we just leave big
-   * buffer or trim? */
-  /* Let's not trim too aggressively to avoid realloc issues if we didn't track
-   * needed perfectly. */
+  /* The check array stays initialized to 0xFF for unmapped slots. Keep the
+   * original allocation instead of shrinking the buffers here. */
 }
 
+/** Deduplicate NFC blocks and build one packed trie half. */
 static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1, uint16_t** s2_off, uint8_t** s2_val, uint8_t** s2_chk, uint16_t* blocks, uint8_t def) {
   *stage1 = (uint8_t*)calloc(NFC_BLOCK_COUNT, sizeof(uint8_t));
   uint8_t* tmp = (uint8_t*)malloc((size_t)NFC_BLOCK_COUNT * NFC_BLOCK_SIZE);
@@ -146,27 +118,28 @@ static void nfc_build_one_trie(const uint8_t* raw, uint8_t** stage1, uint16_t** 
 
   *blocks = unique;
 
-  /* Compress stage2 */
+  /* Compress stage 2. */
   nfc_compress_stage2(tmp, unique, def, s2_off, s2_val, s2_chk);
 
   free(tmp);
 }
 
+/** Build the combined CCC and quick-check trie structures. */
 static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc, const uint8_t* raw_qc) {
   uint8_t* s1_ccc = NULL;
   uint8_t* s1_qc = NULL;
 
-  /* Build Stage 2 (and get raw Stage 1) */
+  /* Build stage 2 and recover the raw stage-1 block indices. */
   nfc_build_one_trie(raw_ccc, &s1_ccc, &d->stage2_ccc_off, &d->stage2_ccc_val, &d->stage2_ccc_chk, &d->stage2_blocks_ccc, 0);
   nfc_build_one_trie(raw_qc, &s1_qc, &d->stage2_qc_off, &d->stage2_qc_val, &d->stage2_qc_chk, &d->stage2_blocks_qc, NFC_QC_YES);
 
-  /* Compress Stage 1 into Combined 3-Stage Trie */
-  /* Map (ccc_block, qc_block) -> pair_id */
+  /* Compress stage 1 into the combined three-stage trie by mapping each
+   * (ccc_block, qc_block) pair to a compact pair id. */
   uint8_t pair_ccc[256];
   uint8_t pair_qc[256];
   int num_pairs = 0;
 
-  /* Temp array for pair ids per block */
+  /* Temporary array of pair ids, one per block. */
   uint8_t* block_pairs = (uint8_t*)malloc(NFC_BLOCK_COUNT);
 
   for (int i = 0; i < NFC_BLOCK_COUNT; ++i) {
@@ -198,11 +171,11 @@ static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc, const uint8_t* ra
   memcpy(d->pair_map_ccc, pair_ccc, num_pairs);
   memcpy(d->pair_map_qc, pair_qc, num_pairs);
 
-  /* Compress block_pairs into chunks of 32 */
+  /* Compress pair ids into deduplicated chunks of 32 blocks. */
   int num_chunks_raw = NFC_BLOCK_COUNT / 32;        /* 136 */
   d->stage1_top = (uint8_t*)malloc(num_chunks_raw); /* Top index */
 
-  /* Deduplicate chunks */
+  /* Deduplicate identical chunks. */
   uint8_t* unique_chunk_data = (uint8_t*)malloc(num_chunks_raw * 32);
   int unique_chunks = 0;
 
@@ -235,7 +208,7 @@ static void nfc_build_trie(NfcData* d, const uint8_t* raw_ccc, const uint8_t* ra
 
 /* ── Composition table builder ─────────────────────────────────────── */
 
-/* Comparator for sorting the composition table */
+/** Compare composition entries by starter, then combining code point. */
 static int nfc_build_comp_cmp(const void* a, const void* b) {
   const NfcCompEntry* ea = (const NfcCompEntry*)a;
   const NfcCompEntry* eb = (const NfcCompEntry*)b;
@@ -245,6 +218,7 @@ static int nfc_build_comp_cmp(const void* a, const void* b) {
   return (ea->combining < eb->combining) ? -1 : 1;
 }
 
+/** Build and sort the NFC composition table from loaded UCD data. */
 static void nfc_build_comp_table(NfcData* d, const uint8_t* raw_ccc, const uint8_t* comp_excl) {
   /* Count composable pairs */
   size_t count = 0;
@@ -300,6 +274,7 @@ static void nfc_build_comp_table(NfcData* d, const uint8_t* raw_ccc, const uint8
 
 /* ── Main UCD loader ───────────────────────────────────────────────── */
 
+/** Advance p to the first byte of the next line or fend. */
 static void nfc_skip_to_next_line(const char** p, const char* fend) {
   while (*p < fend && **p != '\n') {
     ++*p;

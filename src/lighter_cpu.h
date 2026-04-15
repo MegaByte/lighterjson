@@ -3,7 +3,7 @@
 
 #include "lighter_common.h"
 
-/* Architecture Detection */
+/* Architecture detection. */
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
   #define LIGHTER_PLATFORM_X86 1
 #endif
@@ -31,13 +31,14 @@
     #define LIGHTER_TARGET_AVX512
   #endif
 
+/** Return non-zero when AVX2 is available on the current x86 CPU. */
 static inline int lighter_cpu_supports_avx2(void) {
   #if defined(_MSC_VER)
-  int cpuInfo[4];
-  __cpuid(cpuInfo, 0);
-  if (cpuInfo[0] >= 7) {
-    __cpuidex(cpuInfo, 7, 0);
-    return (cpuInfo[1] & (1 << 5)) != 0;
+  int cpu_info[4];
+  __cpuid(cpu_info, 0);
+  if (cpu_info[0] >= 7) {
+    __cpuidex(cpu_info, 7, 0);
+    return (cpu_info[1] & (1 << 5)) != 0;
   }
   return 0;
   #elif defined(__GNUC__) || defined(__clang__)
@@ -48,13 +49,14 @@ static inline int lighter_cpu_supports_avx2(void) {
   #endif
 }
 
+/** Return non-zero when AVX512BW is available on the current x86 CPU. */
 static inline int lighter_cpu_supports_avx512bw(void) {
   #if defined(_MSC_VER)
-  int cpuInfo[4];
-  __cpuid(cpuInfo, 0);
-  if (cpuInfo[0] >= 7) {
-    __cpuidex(cpuInfo, 7, 0);
-    return (cpuInfo[1] & (1 << 30)) != 0; /* bit 30 in EBX for AVX512BW */
+  int cpu_info[4];
+  __cpuid(cpu_info, 0);
+  if (cpu_info[0] >= 7) {
+    __cpuidex(cpu_info, 7, 0);
+    return (cpu_info[1] & (1 << 30)) != 0; /* bit 30 in EBX for AVX512BW */
   }
   return 0;
   #elif defined(__GNUC__) || defined(__clang__)
@@ -70,9 +72,11 @@ static inline int lighter_cpu_supports_avx512bw(void) {
   #define LIGHTER_PLATFORM_X86 0
   #define LIGHTER_TARGET_AVX2
   #define LIGHTER_TARGET_AVX512
+/** Return 0 when x86 runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_avx2(void) {
   return 0;
 }
+/** Return 0 when x86 runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_avx512bw(void) {
   return 0;
 }
@@ -83,10 +87,12 @@ static inline int lighter_cpu_supports_avx512bw(void) {
   #if defined(__GNUC__) || defined(__clang__)
     #include <arm_neon.h>
   #endif
+/** Return non-zero when NEON is available on the current ARM64 CPU. */
 static inline int lighter_cpu_supports_neon(void) {
   return 1;
 }
 #else
+/** Return 0 when ARM64 runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_neon(void) {
   return 0;
 }
@@ -114,6 +120,7 @@ struct lighter_riscv_hwprobe {
   uint64_t value;
 };
 
+/** Return non-zero when RVV is available on the current RISC-V CPU. */
 static inline int lighter_cpu_supports_rvv(void) {
   #if defined(__linux__) && defined(__NR_riscv_hwprobe)
   struct lighter_riscv_hwprobe pair;
@@ -125,6 +132,7 @@ static inline int lighter_cpu_supports_rvv(void) {
   return 0;
 }
 #else
+/** Return 0 when RISC-V runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_rvv(void) {
   return 0;
 }

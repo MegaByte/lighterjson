@@ -9,8 +9,129 @@
 #include <stdint.h>
 
 #include "lighter_common.h"
-#include "lighter_math.h"
-#include "lighter_simd.h"
+#include "lighter_cpu.h"
+
+#if LIGHTER_PLATFORM_X86
+  #include <immintrin.h>
+#endif
+
+#if LIGHTER_PLATFORM_ARM64
+  #include <arm_neon.h>
+#endif
+
+#define LIGHTER_INT64_MAX_VALUE 9223372036854775807LL
+#define LIGHTER_INT64_MAX_LAST_DIGIT 7
+#define LIGHTER_INT64_MAX_DIV10 922337203685477580LL
+
+/** Binary search magnitude detection for uint64_t digits. */
+static inline uint32_t lighter_digits_u64(uint64_t n) {
+  if (n < 10000000000ULL) {
+    if (n < 100000) {
+      if (n < 100) {
+        if (n < 10) {
+          return 1;
+        }
+        return 2;
+      }
+      if (n < 1000) {
+        return 3;
+      }
+      if (n < 10000) {
+        return 4;
+      }
+      return 5;
+    }
+    if (n < 10000000) {
+      if (n < 1000000) {
+        return 6;
+      }
+      return 7;
+    }
+    if (n < 100000000) {
+      return 8;
+    }
+    if (n < 1000000000) {
+      return 9;
+    }
+    return 10;
+  }
+  if (n < 1000000000000000ULL) {
+    if (n < 1000000000000ULL) {
+      if (n < 100000000000ULL) {
+        return 11;
+      }
+      return 12;
+    }
+    if (n < 10000000000000ULL) {
+      return 13;
+    }
+    if (n < 100000000000000ULL) {
+      return 14;
+    }
+    return 15;
+  }
+  if (n < 100000000000000000ULL) {
+    if (n < 10000000000000000ULL) {
+      return 16;
+    }
+    return 17;
+  }
+  if (n < 1000000000000000000ULL) {
+    return 18;
+  }
+  if (n < 10000000000000000000ULL) {
+    return 19;
+  }
+  return 20;
+}
+
+#if LIGHTER_PLATFORM_X86
+/** Returns a mask of bytes that are digits '0'-'9'. */
+static inline __m256i lighter_simd_is_digit_avx2(__m256i chunk) {
+  return _mm256_and_si256(_mm256_cmpgt_epi8(chunk, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), chunk));
+}
+
+/** Collapse an AVX2 byte mask to a 32-bit lane mask. */
+static inline uint32_t lighter_simd_mask_avx2(__m256i m) {
+  return (uint32_t)_mm256_movemask_epi8(m);
+}
+
+/** Return the index of the first set bit in an AVX2 mask. */
+static inline uint32_t lighter_simd_first_set_avx2(uint32_t mask) {
+  #if defined(_MSC_VER)
+  unsigned long offset;
+  _BitScanForward(&offset, mask);
+  return (uint32_t)offset;
+  #else
+  return (uint32_t)__builtin_ctz(mask);
+  #endif
+}
+#endif
+
+#if LIGHTER_PLATFORM_ARM64
+/** Returns a mask of bytes that are digits '0'-'9'. */
+static inline uint8x16_t lighter_simd_is_digit_neon(uint8x16_t chunk) {
+  return vandq_u8(vcgeq_u8(chunk, vdupq_n_u8('0')), vcleq_u8(chunk, vdupq_n_u8('9')));
+}
+
+/** Return the index of the first set bit in a NEON mask. */
+static inline uint64_t lighter_simd_first_set_neon(uint64_t mask) {
+  #if defined(_MSC_VER)
+  unsigned long offset;
+  _BitScanForward64(&offset, mask);
+  return (uint64_t)(offset >> 3);
+  #else
+  return (uint64_t)(__builtin_ctzll(mask) >> 3);
+  #endif
+}
+#endif
+
+#if LIGHTER_PLATFORM_RISCV
+/** Returns a mask of bytes that are digits '0'-'9'. */
+static inline vbool8_t lighter_simd_is_digit_rvv(vuint8m1_t chunk, size_t vl) {
+  return __riscv_vmand_mm_b8(__riscv_vmsgeu_vx_u8m1_b8(chunk, '0', vl), __riscv_vmsleu_vx_u8m1_b8(chunk, '9', vl), vl);
+}
+#endif
 
 /** Write an exponent string adjusted by a small delta. Performs string-based addition/subtraction. */
 static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* start, uint64_t len, int negative, int64_t delta) {
@@ -151,6 +272,7 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
   }
 }
 
+/** Parse, normalize, and rewrite the JSON number at rindex. */
 static inline void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   (void)has_avx512;
   (void)has_avx2;
@@ -191,7 +313,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     negative = 1;
     ++p_scan;
   }
-  data->rindex = p_scan; /* update for later use in loops if needed */
+  data->rindex = p_scan;
 
   /* Fast path for common short integers: already canonical form, no reformatting.
    * Requires: first digit is '1'..'9', subsequent bytes up to a non-digit are all
@@ -276,7 +398,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       uint64_t mask_invalid = vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 0) | vgetq_lane_u64(vreinterpretq_u64_u8(m_invalid), 1);
 
       if (LIGHTER_UNLIKELY(mask_delimit || mask_invalid)) {
-        /* Exit SIMD for simplicity on action point */
+        /* Leave the SIMD loop at the first delimiter or non-digit byte. */
       } else {
         /* Fast skip: update bounds */
         {
@@ -362,7 +484,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
           switch (*(i + 1)) {
             case '-':
               negative_exponent = 1;
-              /* fallthrough */
+              /* fall through */
             case '+':
               ++i;
           }
@@ -509,8 +631,9 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
     }
     exponent_start = p;
     for (i = (uint8_t*)exponent_start; i <= number_end; ++i) {
-      if (LIGHTER_UNLIKELY(exponent_value > 922337203685477580LL || (exponent_value == 922337203685477580LL && (*i - '0') > 7))) {
-        exponent_value = 9223372036854775807LL;
+      if (LIGHTER_UNLIKELY(exponent_value > LIGHTER_INT64_MAX_DIV10 ||
+                           (exponent_value == LIGHTER_INT64_MAX_DIV10 && (*i - '0') > LIGHTER_INT64_MAX_LAST_DIGIT))) {
+        exponent_value = LIGHTER_INT64_MAX_VALUE;
         exponent_saturated = 1;
         break; /* further digits don't change the saturated value */
       }
@@ -531,20 +654,20 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
                                   : exponent ? exponent - 1
                                              : number_end) -
                         (int64_t)non_zero_finish;
-    if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_max, &max_exponent))) {
+    if (LIGHTER_UNLIKELY(lighter_add_overflow(exponent_value, delta_max, &max_exponent))) {
       is_huge = 1;
     }
-    if (LIGHTER_UNLIKELY(LIGHTER_ADD_OVERFLOW(exponent_value, delta_min, &min_exponent))) {
+    if (LIGHTER_UNLIKELY(lighter_add_overflow(exponent_value, delta_min, &min_exponent))) {
       is_huge = 1;
     }
   }
 
   if (LIGHTER_LIKELY(precision == LIGHTER_PRECISION_UNLIMITED)) {
-    /* Skip rounding */
+    /* Rounding disabled. */
   } else if (is_huge) {
-    /* Huge exponent handling for rounding */
+    /* Handle rounding when the exponent arithmetic saturated. */
     if (exponent_value < 0) {
-      /* Effectively rounds to zero if precision is within int64_t limits */
+      /* The rounding position lies before the first significant digit. */
       if (negative) {
         --(data->rindex);
       }
@@ -552,7 +675,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
       *data->windex++ = '0';
       return;
     }
-    /* Else huge positive: rounding point is infinitely far to the right, so it's a no-op on digits */
+    /* Positive saturated exponents leave the significand unchanged here. */
   } else {
     if (-precision > max_exponent) {
       if (negative) {

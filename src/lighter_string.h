@@ -19,8 +19,6 @@
 /* \uXXXX = 4 hex digits; UTF-8 and surrogate boundaries (Unicode). */
 #define UNICODE_ESCAPE_HEX_LEN 4
 #define UTF8_ASCII_MAX 0x80u
-#define UTF8_2BYTE_MAX 0x800u
-#define UTF8_3BYTE_MAX 0x10000u
 #define SURROGATE_HIGH_START 0xD800u
 #define SURROGATE_LOW_START 0xDC00u
 #define SURROGATE_MASK 0x3FFu
@@ -33,6 +31,7 @@ static const uint8_t lighter_hex_table[64] = {
     0x80, 10,   11,   12,   13,   14,   15,   0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80  /* `, a-f, g-o */
 };
 
+/** Parse four hex digits at rindex as a \uXXXX value. */
 static inline uint64_t lighter_string_hex_value(LighterData* data) {
   if (data->rindex + UNICODE_ESCAPE_HEX_LEN > data->data_end) {
     return (uint64_t)INT64_MAX;
@@ -58,6 +57,7 @@ static inline uint64_t lighter_string_hex_value(LighterData* data) {
   return (uint64_t)((v0 << 12) | (v1 << 8) | (v2 << 4) | v3);
 }
 
+/** Decode one JSON \u escape and append its UTF-8 form to the output. */
 static inline void lighter_string_do_unicode(LighterData* data) {
   uint64_t value = lighter_string_hex_value(data);
   if (value == (uint64_t)INT64_MAX) {
@@ -83,8 +83,13 @@ static inline void lighter_string_do_unicode(LighterData* data) {
         data->lindex = data->rindex;
       } else {
         data->rindex = saved_rindex;
+        return;
       }
+    } else {
+      return;
     }
+  } else if (value >= SURROGATE_LOW_START && value <= SURROGATE_LOW_START + SURROGATE_MASK) {
+    return;
   }
 
   if (value < 0x20) { /* C0 controls */
@@ -122,21 +127,12 @@ static inline void lighter_string_do_unicode(LighterData* data) {
       *data->windex++ = '\\';
     }
     *data->windex++ = (uint8_t)value;
-  } else if (value < UTF8_2BYTE_MAX) {
-    *data->windex++ = ((uint8_t)(value >> 6) & 0x1F) | 0xC0;
-    *data->windex++ = ((uint8_t)(value & 0x3F)) | 0x80;
-  } else if (value < UTF8_3BYTE_MAX) {
-    *data->windex++ = ((uint8_t)(value >> 12) & 0xF) | 0xE0;
-    *data->windex++ = ((uint8_t)(value >> 6) & 0x3F) | 0x80;
-    *data->windex++ = ((uint8_t)value & 0x3F) | 0x80;
   } else {
-    *data->windex++ = ((uint8_t)(value >> 18) & 0x7) | 0xF0;
-    *data->windex++ = ((uint8_t)(value >> 12) & 0x3F) | 0x80;
-    *data->windex++ = ((uint8_t)(value >> 6) & 0x3F) | 0x80;
-    *data->windex++ = ((uint8_t)value & 0x3F) | 0x80;
+    data->windex = lighter_write_utf8_scalar(data->windex, (uint32_t)value);
   }
 }
 
+/** Handle a JSON string escape sequence at rindex. */
 static inline void lighter_string_do_escape(LighterData* data) {
   if (LIGHTER_UNLIKELY(data->rindex + 1 >= data->data_end)) {
     /* Trailing '\\' at end of input — advance past it to avoid infinite loop. */
@@ -170,6 +166,7 @@ static inline void lighter_string_do_escape(LighterData* data) {
 
 #if LIGHTER_PLATFORM_X86
 LIGHTER_TARGET_AVX512
+/** Advance to the next quote or backslash with an AVX512 scan. */
 static inline void lighter_simd_avx512_string_skip(LighterData* data, int* saw_non_ascii) {
   const __m512i quote = _mm512_set1_epi8('"');
   const __m512i escape = _mm512_set1_epi8('\\');
@@ -205,6 +202,7 @@ static inline void lighter_simd_avx512_string_skip(LighterData* data, int* saw_n
 }
 
 LIGHTER_TARGET_AVX2
+/** Advance to the next quote or backslash with an AVX2 scan. */
 static inline void lighter_simd_avx2_string_skip(LighterData* data, int* saw_non_ascii) {
   const __m256i quote = _mm256_set1_epi8('"');
   const __m256i escape = _mm256_set1_epi8('\\');
@@ -231,6 +229,7 @@ static inline void lighter_simd_avx2_string_skip(LighterData* data, int* saw_non
 }
 #endif /* LIGHTER_PLATFORM_X86 */
 #if LIGHTER_PLATFORM_ARM64
+/** Advance to the next quote or backslash with a NEON scan. */
 static inline void lighter_simd_neon_string_skip(LighterData* data, int* saw_non_ascii) {
   const uint8x16_t quote = vdupq_n_u8('"');
   const uint8x16_t escape = vdupq_n_u8('\\');
@@ -271,6 +270,7 @@ static inline void lighter_simd_neon_string_skip(LighterData* data, int* saw_non
 #endif
 
 #if LIGHTER_PLATFORM_RISCV
+/** Advance to the next quote or backslash with an RVV scan. */
 static inline void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_ascii) {
   while (data->rindex < data->data_end) {
     size_t n = data->data_end - data->rindex;
@@ -295,6 +295,7 @@ static inline void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_
 }
 #endif
 
+/** Finalize parsing when rindex is positioned at the string tail or closing quote. */
 static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv, int saw_non_ascii) {
   if (data->rindex >= data->data_end) {
     return 1;
@@ -330,8 +331,7 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
   return 0;
 }
 
-/** Parse and optionally NFC-normalize a JSON string. NFC data is loaded on first use
- *  when a string ends. Uses lighter_write_data to flush segments. */
+/** Parse the JSON string at rindex and optionally NFC-normalize its content. */
 static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
   ++(data->rindex);
   int saw_non_ascii = 0;
@@ -357,11 +357,8 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   }
 #endif
 
-  /* NEON path intentionally not used: benchmarking showed the 8-byte SWAR fallback
-   * below is consistently 10-70% faster on realistic workloads. The NEON function-call
-   * overhead + register setup per string outweighs the wider vector skip, since most
-   * JSON strings are short-to-medium (tens to hundreds of bytes) and strings have
-   * natural breaks at closing quote/escape rather than long runs. */
+  /* ARM64 uses the 8-byte SWAR path here; the dedicated NEON string-skip helper
+   * is retained only to keep the implementation available. */
 #if LIGHTER_PLATFORM_ARM64
   (void)lighter_simd_neon_string_skip; /* silence unused warning */
 #endif

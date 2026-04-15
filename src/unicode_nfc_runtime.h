@@ -42,9 +42,11 @@
 #define NFC_BIN_MAX_COMP_SIZE 500000u
 #define NFC_BIN_MAX_U8 256u
 #define NFC_STAGE1_MAX_CHUNK_BITS 8
+#define NFC_COMP_HASH_MULTIPLIER 31u
 
 /* ── UTF-8 codec ───────────────────────────────────────────────────── */
 
+/** Decode one UTF-8 code point from p and return the number of consumed bytes. */
 static inline int nfc_utf8_decode(const uint8_t* p, const uint8_t* end, uint32_t* cp) {
   if (p >= end) {
     return 0;
@@ -82,6 +84,7 @@ static inline int nfc_utf8_decode(const uint8_t* p, const uint8_t* end, uint32_t
   return 4;
 }
 
+/** Encode one code point to UTF-8 and return the number of written bytes. */
 static inline int nfc_utf8_encode(uint8_t* p, uint32_t cp) {
   if (cp < UTF8_ASCII_MAX) {
     p[0] = (uint8_t)cp;
@@ -107,12 +110,10 @@ static inline int nfc_utf8_encode(uint8_t* p, uint32_t cp) {
 
 /* ── Table lookups ─────────────────────────────────────────────────── */
 
+/** Return the canonical combining class for cp. */
 static inline uint8_t nfc_get_ccc(const NfcData* d, uint32_t cp) {
   if (cp >= NFC_MAX_CP) {
     return 0;
-  }
-  if (d->ccc_dense) {
-    return d->ccc_dense[cp];
   }
   uint32_t block_idx = cp >> NFC_BLOCK_SHIFT;
   uint8_t chunk_idx = d->stage1_top[block_idx >> NFC_STAGE1_CHUNK_BITS];
@@ -122,12 +123,10 @@ static inline uint8_t nfc_get_ccc(const NfcData* d, uint32_t cp) {
   return (d->stage2_ccc_chk[off] == blk) ? d->stage2_ccc_val[off] : 0;
 }
 
+/** Return the NFC quick-check value for cp. */
 static inline uint8_t nfc_get_qc(const NfcData* d, uint32_t cp) {
   if (cp >= NFC_MAX_CP) {
     return NFC_QC_YES;
-  }
-  if (d->qc_dense) {
-    return d->qc_dense[cp];
   }
   uint32_t block_idx = cp >> NFC_BLOCK_SHIFT;
   uint8_t chunk_idx = d->stage1_top[block_idx >> NFC_STAGE1_CHUNK_BITS];
@@ -137,26 +136,7 @@ static inline uint8_t nfc_get_qc(const NfcData* d, uint32_t cp) {
   return (d->stage2_qc_chk[off] == blk) ? d->stage2_qc_val[off] : NFC_QC_YES;
 }
 
-static inline int nfc_build_decomp_idx(NfcData* d) {
-  if (d->decomp_idx) {
-    return 1;
-  }
-  d->decomp_idx = (uint32_t*)calloc(NFC_MAX_CP, sizeof(uint32_t));
-  if (!d->decomp_idx) {
-    return 0;
-  }
-  for (size_t i = 0; i < d->decomp_sparse_count; ++i) {
-    uint32_t cp = nfc_decomp_sparse_cp(d, i);
-    uint32_t idx = nfc_decomp_sparse_idx(d, i);
-    d->decomp_idx[cp] = idx;
-  }
-  free((void*)d->decomp_sparse);
-  d->decomp_sparse = NULL;
-  d->decomp_sparse_count = 0;
-  return 1;
-}
-
-/* Canonical decomposition of one code point. Returns length (0 = none). */
+/** Canonically decompose one code point and return the output length. */
 static inline int nfc_decompose_one(const NfcData* d, uint32_t cp, uint32_t* out) {
   /* Hangul syllable decomposition */
   if (cp >= HANGUL_SBASE && cp < HANGUL_SBASE + HANGUL_SCOUNT) {
@@ -176,9 +156,7 @@ static inline int nfc_decompose_one(const NfcData* d, uint32_t cp, uint32_t* out
   }
 
   uint32_t idx = 0;
-  if (d->decomp_idx) {
-    idx = d->decomp_idx[cp];
-  } else if (d->decomp_sparse && d->decomp_sparse_count > 0) {
+  if (d->decomp_sparse && d->decomp_sparse_count > 0) {
     size_t l = 0;
     size_t h = d->decomp_sparse_count;
     while (l < h) {
@@ -207,6 +185,7 @@ static inline int nfc_decompose_one(const NfcData* d, uint32_t cp, uint32_t* out
 
 /* ── Composition Logic ─────────────────────────────────────────────── */
 
+/** Return the NFC composition result for a starter/combining pair, or 0. */
 static uint32_t nfc_compose_pair(const NfcData* d, uint32_t starter, uint32_t combining) {
   /* Hangul L+V or LV+T? */
   if (starter >= HANGUL_LBASE && starter < HANGUL_LBASE + HANGUL_LCOUNT) {
@@ -231,7 +210,7 @@ static uint32_t nfc_compose_pair(const NfcData* d, uint32_t starter, uint32_t co
   /* Hash lookup (binary loader builds this) */
   if (d->comp_hash && d->comp_hash_cap) {
     size_t cap = d->comp_hash_cap;
-    size_t i = ((size_t)starter * 31u + (size_t)combining) % cap;
+    size_t i = ((size_t)starter * NFC_COMP_HASH_MULTIPLIER + (size_t)combining) % cap;
     for (;;) {
       const NfcCompEntry* e = &d->comp_hash[i];
       if (e->composed == 0 && e->starter == 0 && e->combining == 0) {
@@ -272,6 +251,7 @@ static uint32_t nfc_compose_pair(const NfcData* d, uint32_t starter, uint32_t co
 
 /* ── Recursive full canonical decomposition ────────────────────────── */
 
+/** Fully decompose cp into buf and return the output length. */
 static inline int nfc_full_decompose(const NfcData* d, uint32_t cp, uint32_t* buf, int max) {
   uint32_t parts[NFC_DECOMP_MAX];
   int n = nfc_decompose_one(d, cp, parts);
@@ -289,6 +269,7 @@ static inline int nfc_full_decompose(const NfcData* d, uint32_t cp, uint32_t* bu
   return total;
 }
 
+/** Append the full decomposition of cp to a growable buffer. */
 static int nfc_full_decompose_append(const NfcData* d, uint32_t cp, uint32_t** buf, size_t* len, size_t* cap, uint32_t* stack_buf, size_t stack_cap) {
   uint32_t parts[NFC_DECOMP_MAX];
   int n = nfc_decompose_one(d, cp, parts);
@@ -326,6 +307,7 @@ static int nfc_full_decompose_append(const NfcData* d, uint32_t cp, uint32_t** b
 
 /* ── Canonical ordering (insertion sort by CCC, stable) ────────────── */
 
+/** Reorder buf into canonical combining-class order. */
 static void nfc_canonical_order(const NfcData* d, uint32_t* buf, int len) {
   for (int i = 1; i < len; ++i) {
     uint32_t cp = buf[i];
@@ -344,6 +326,7 @@ static void nfc_canonical_order(const NfcData* d, uint32_t* buf, int len) {
 
 /* ── Canonical composition ─────────────────────────────────────────── */
 
+/** Compose a canonically ordered buffer in place and return the new length. */
 static int nfc_compose_buf(const NfcData* d, uint32_t* buf, int len) {
   if (len < 2) {
     return len;
@@ -389,134 +372,13 @@ static int nfc_compose_buf(const NfcData* d, uint32_t* buf, int len) {
   return out;
 }
 
-/* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
-
-/* Lazy loader (defined at end of file); loads only when slow path is needed. */
-static inline NfcData* nfc_get_or_load(const char* path);
-
-/* Returns NFC_QC_YES if the byte range is definitely in NFC,
-   NFC_QC_NO or NFC_QC_MAYBE otherwise.
-   Fast path: if every byte < NFC_QC_FAST_PATH_BYTE, segment is NFC-safe (no load).
-   Loads NFC data from path only when the slow path is needed. */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  const uint8_t* p = start;
-  int found_high = 0;
-
-#if LIGHTER_PLATFORM_X86
-  if (has_avx512) {
-    while (p + 64 <= end) {
-      __m512i chunk = _mm512_loadu_si512((const void*)p);
-      if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
-        found_high = 1;
-        break;
-      }
-      p += 64;
-    }
-  } else if (has_avx2) {
-    while (p + 32 <= end) {
-      __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
-      if (_mm256_movemask_epi8(chunk) != 0) {
-        found_high = 1;
-        break;
-      }
-      p += 32;
-    }
-  } else
-#endif
-#if LIGHTER_PLATFORM_ARM64
-      if (has_neon) {
-    while (p + 16 <= end) {
-      uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
-      /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */
-      if (vmaxvq_u8(chunk) >= 0x80) {
-        found_high = 1;
-        break;
-      }
-      p += 16;
-    }
-  } else
-#endif
-#if LIGHTER_PLATFORM_RISCV
-      if (has_rvv) {
-    while (p < end) {
-      size_t n = end - p;
-      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-      vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-      vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
-      if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
-        found_high = 1;
-        break;
-      }
-      p += vl;
-    }
-  } else
-#endif
-  {
-    /* Fast-path: strictly 7-bit ASCII */
-    while (p + 8 <= end) {
-      uint64_t v;
-      memcpy(&v, p, 8);
-      if (v & 0x8080808080808080ULL) {
-        break;
-      }
-      p += 8;
-    }
-  }
-  if (!found_high) {
-    for (const uint8_t* check = p; check < end; ++check) {
-      if (*check >= 0x80) {
-        found_high = 1;
-        break;
-      }
-    }
-  }
-  if (!found_high) {
-    return NFC_QC_YES;
-  }
-
-  {
-    const NfcData* d = nfc_get_or_load(path);
-    if (!d) {
-      return NFC_QC_YES;
-    }
-    uint8_t last_ccc = 0;
-    int result = NFC_QC_YES;
-    p = start;
-    while (p < end) {
-      uint32_t cp;
-      int n = nfc_utf8_decode(p, end, &cp);
-      if (!n) {
-        break;
-      }
-      p += n;
-      uint8_t ccc = nfc_get_ccc(d, cp);
-      if (last_ccc > ccc && ccc != 0) {
-        return NFC_QC_NO;
-      }
-      uint8_t qc = nfc_get_qc(d, cp);
-      if (qc == NFC_QC_NO) {
-        return NFC_QC_NO;
-      }
-      if (qc == NFC_QC_MAYBE) {
-        result = NFC_QC_MAYBE;
-      }
-      last_ccc = ccc;
-    }
-    return result;
-  }
-}
-
 /* ── Incremental NFC: normalize between starters ──────────────────── */
 
-/* Smarter in-place normalization that processes only segments that need it.
-   A "segment" is a starter followed by all subsequent non-starters up to
-   (but not including) the next starter.
-   Returns new end pointer. */
+/** Normalize [start, end) to NFC in place and return the new end pointer. */
 static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start, uint8_t* end) {
   if (!d) {
     return end;
   }
-  (void)nfc_build_decomp_idx((NfcData*)d);
   /* Byte scan fast path */
   {
     const uint8_t* p = start;
@@ -673,7 +535,7 @@ finish:
   }
   return wp;
 }
-/* RLE decode: escape 0x00 = literal escape; escape n (3<=n<=255) + byte = run. */
+/** Decode one RLE-compressed NFC table section into dst. */
 static int nfc_rle_decode(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_len) {
   size_t si = 0, di = 0;
   while (si < src_len && di < dst_len) {
@@ -703,11 +565,7 @@ static int nfc_rle_decode(const uint8_t* src, size_t src_len, uint8_t* dst, size
   return (di == dst_len && si == src_len) ? 0 : -1;
 }
 
-/* ── Binary Loader ───────────────────────────────────────────────────
- * V2 format (96-byte header): s2 pools RLE-compressed; 4× packed sizes at 88.
- * Sparse decomp indices 24-bit on disk. Load builds dense CCC/QC, decomp_idx, comp hash.
- */
-
+/** Load the packed NFC runtime tables from path. */
 static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   NfcData* d = (NfcData*)calloc(1, sizeof(NfcData));
   if (!d) {
@@ -986,24 +844,7 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
     comp_src += NFC_COMP_ENTRY_BYTES;
   }
 
-  /* Build speed structures: dense CCC/QC, decomp_idx, comp hash */
-  d->ccc_dense = (uint8_t*)malloc(NFC_MAX_CP);
-  d->qc_dense = (uint8_t*)malloc(NFC_MAX_CP);
-  if (!d->ccc_dense || !d->qc_dense) {
-    goto bin_fail;
-  }
-  for (uint32_t cp = 0; cp < NFC_MAX_CP; cp++) {
-    uint32_t block_idx = cp >> NFC_BLOCK_SHIFT;
-    uint8_t chunk_idx = d->stage1_top[block_idx >> NFC_STAGE1_CHUNK_BITS];
-    uint8_t pair_id = d->stage1_chunks[((size_t)chunk_idx << NFC_STAGE1_CHUNK_BITS) + (block_idx & (NFC_STAGE1_CHUNK_ENTRIES - 1))];
-    uint8_t ccc_blk = d->pair_map_ccc[pair_id];
-    uint32_t ccc_off = d->stage2_ccc_off[ccc_blk] + (cp & NFC_BLOCK_MASK);
-    d->ccc_dense[cp] = (d->stage2_ccc_chk[ccc_off] == ccc_blk) ? d->stage2_ccc_val[ccc_off] : 0;
-    uint8_t qc_blk = d->pair_map_qc[pair_id];
-    uint32_t qc_off = d->stage2_qc_off[qc_blk] + (cp & NFC_BLOCK_MASK);
-    d->qc_dense[cp] = (d->stage2_qc_chk[qc_off] == qc_blk) ? d->stage2_qc_val[qc_off] : NFC_QC_YES;
-  }
-  /* Size hash: next power of 2 >= 2*comp_size, between NFC_COMP_HASH_MIN and NFC_COMP_HASH_MAX */
+  /* Build the composition hash from the unpacked composition table. */
   hash_cap = NFC_COMP_HASH_MIN;
   while (hash_cap < (size_t)comp_size * 2u && hash_cap < NFC_COMP_HASH_MAX) {
     hash_cap *= 2;
@@ -1015,7 +856,7 @@ static NFC_UNUSED NfcData* nfc_load_binary(const char* path) {
   d->comp_hash_cap = hash_cap;
   for (uint32_t i = 0; i < comp_size; i++) {
     uint32_t st = d->comp_table[i].starter, cb = d->comp_table[i].combining, co = d->comp_table[i].composed;
-    size_t j = ((size_t)st * 31u + (size_t)cb) % hash_cap;
+    size_t j = ((size_t)st * NFC_COMP_HASH_MULTIPLIER + (size_t)cb) % hash_cap;
     while (d->comp_hash[j].composed != 0 || d->comp_hash[j].starter != 0 || d->comp_hash[j].combining != 0) {
       j = (j + 1u) % hash_cap;
     }
@@ -1041,17 +882,15 @@ bin_fail:
     free((void*)d->decomp_sparse);
     free(d->comp_table);
     free(d->comp_hash);
-    free(d->ccc_dense);
-    free(d->qc_dense);
     free(d->decomp_idx);
     free(d);
   }
   return NULL;
 }
 
-/* Lazy load: call from slow path only (e.g. when quick-check fast path fails or we normalize). */
 static NfcData* nfc_cached = NULL;
 static int nfc_load_tried = 0;
+/** Return the cached NFC tables, loading them on first use. */
 static inline NfcData* nfc_get_or_load(const char* path) {
   if (!nfc_load_tried) {
     nfc_load_tried = 1;
@@ -1061,6 +900,117 @@ static inline NfcData* nfc_get_or_load(const char* path) {
     }
   }
   return nfc_cached;
+}
+
+/* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
+
+/** Return the NFC quick-check result for the UTF-8 span [start, end). */
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+  const uint8_t* p = start;
+  int found_high = 0;
+
+#if LIGHTER_PLATFORM_X86
+  if (has_avx512) {
+    while (p + 64 <= end) {
+      __m512i chunk = _mm512_loadu_si512((const void*)p);
+      if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
+        found_high = 1;
+        break;
+      }
+      p += 64;
+    }
+  } else if (has_avx2) {
+    while (p + 32 <= end) {
+      __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+      if (_mm256_movemask_epi8(chunk) != 0) {
+        found_high = 1;
+        break;
+      }
+      p += 32;
+    }
+  } else
+#endif
+#if LIGHTER_PLATFORM_ARM64
+      if (has_neon) {
+    while (p + 16 <= end) {
+      uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
+      /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */
+      if (vmaxvq_u8(chunk) >= 0x80) {
+        found_high = 1;
+        break;
+      }
+      p += 16;
+    }
+  } else
+#endif
+#if LIGHTER_PLATFORM_RISCV
+      if (has_rvv) {
+    while (p < end) {
+      size_t n = end - p;
+      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+      vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+      vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
+      if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
+        found_high = 1;
+        break;
+      }
+      p += vl;
+    }
+  } else
+#endif
+  {
+    /* Fast-path: strictly 7-bit ASCII */
+    while (p + 8 <= end) {
+      uint64_t v;
+      memcpy(&v, p, 8);
+      if (v & 0x8080808080808080ULL) {
+        break;
+      }
+      p += 8;
+    }
+  }
+  if (!found_high) {
+    for (const uint8_t* check = p; check < end; ++check) {
+      if (*check >= 0x80) {
+        found_high = 1;
+        break;
+      }
+    }
+  }
+  if (!found_high) {
+    return NFC_QC_YES;
+  }
+
+  {
+    const NfcData* d = nfc_get_or_load(path);
+    if (!d) {
+      return NFC_QC_YES;
+    }
+    uint8_t last_ccc = 0;
+    int result = NFC_QC_YES;
+    p = start;
+    while (p < end) {
+      uint32_t cp;
+      int n = nfc_utf8_decode(p, end, &cp);
+      if (!n) {
+        break;
+      }
+      p += n;
+      uint8_t ccc = nfc_get_ccc(d, cp);
+      if (last_ccc > ccc && ccc != 0) {
+        return NFC_QC_NO;
+      }
+      uint8_t qc = nfc_get_qc(d, cp);
+      if (qc == NFC_QC_NO) {
+        return NFC_QC_NO;
+      }
+      if (qc == NFC_QC_MAYBE) {
+        result = NFC_QC_MAYBE;
+      }
+      last_ccc = ccc;
+    }
+    return result;
+  }
 }
 
 #endif /* UNICODE_NFC_RUNTIME_H */

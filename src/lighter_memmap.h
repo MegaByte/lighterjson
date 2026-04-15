@@ -24,6 +24,7 @@
 #endif
 
 #if LIGHTER_MEMMAP_WIN
+/** Convert a UTF-8 path to an extended-length Windows wide path. */
 static inline wchar_t* lighter_make_long_path_w(const char* utf8_path) {
   int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, NULL, 0);
   if (wlen <= 0) {
@@ -80,18 +81,14 @@ typedef struct LighterMap {
   uint8_t* data;
   size_t size;
 #if LIGHTER_MEMMAP_WIN
-  HANDLE hFile;
-  HANDLE hMap;
+  HANDLE h_file;
+  HANDLE h_map;
 #else
   int fd;
 #endif
 } LighterMap;
 
-/**
- * Map a file. read_only: 1 = read-only, 0 = read-write.
- * On success sets m->data and m->size and returns 0.
- * On failure returns -1 and reports to stderr; caller must not call lighter_map_close.
- */
+/** Map path for reading or read-write access. */
 static inline int lighter_map_open(LighterMap* m, const char* path, int read_only) {
 #if LIGHTER_MEMMAP_WIN
   wchar_t* wpath = lighter_make_long_path_w(path);
@@ -115,24 +112,24 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
     return -1;
   }
   m->size = (size_t)li.QuadPart;
-  m->hMap = CreateFileMappingA(h, NULL, read_only ? PAGE_READONLY : PAGE_READWRITE, 0, 0, NULL);
-  if (!m->hMap) {
+  m->h_map = CreateFileMappingA(h, NULL, read_only ? PAGE_READONLY : PAGE_READWRITE, 0, 0, NULL);
+  if (!m->h_map) {
     if (!read_only) {
       fprintf(stderr, "Could not map file\n");
     }
     CloseHandle(h);
     return -1;
   }
-  m->data = (uint8_t*)MapViewOfFile(m->hMap, read_only ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS, 0, 0, read_only ? m->size : 0);
+  m->data = (uint8_t*)MapViewOfFile(m->h_map, read_only ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS, 0, 0, read_only ? m->size : 0);
   if (!m->data) {
     if (!read_only) {
       fprintf(stderr, "Could not map view\n");
     }
-    CloseHandle(m->hMap);
+    CloseHandle(m->h_map);
     CloseHandle(h);
     return -1;
   }
-  m->hFile = read_only ? INVALID_HANDLE_VALUE : h;
+  m->h_file = read_only ? INVALID_HANDLE_VALUE : h;
   if (read_only) {
     CloseHandle(h);
   }
@@ -163,9 +160,7 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
 #endif
 }
 
-/**
- * Flush the first len bytes of the mapping to disk.
- */
+/** Flush len bytes of the current mapping to disk. */
 static inline int lighter_map_sync(LighterMap* m, size_t len, int async_io) {
 #if LIGHTER_MEMMAP_WIN
   (void)async_io;
@@ -175,24 +170,18 @@ static inline int lighter_map_sync(LighterMap* m, size_t len, int async_io) {
 #endif
 }
 
-/**
- * Truncate the file to len bytes. Call after unmapping or with len already synced.
- */
+/** Truncate the mapped file to len bytes. */
 static inline int lighter_map_truncate(LighterMap* m, size_t len) {
 #if LIGHTER_MEMMAP_WIN
   LARGE_INTEGER li;
   li.QuadPart = (LONGLONG)len;
-  return (SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN) && SetEndOfFile(m->hFile)) ? 0 : -1;
+  return (SetFilePointerEx(m->h_file, li, NULL, FILE_BEGIN) && SetEndOfFile(m->h_file)) ? 0 : -1;
 #else
   return ftruncate(m->fd, (off_t)len);
 #endif
 }
 
-/**
- * Expand the file and mapping. On Unix, *old_data_out is set to the previous data pointer,
- * which must be manually unmapped via lighter_map_unmap(old_data, old_size).
- * On Windows, the old mapping is always closed and *old_data_out is set to NULL.
- */
+/** Grow the mapped file and remap it to new_size bytes. */
 static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** old_data_out, size_t* old_size_out) {
   size_t old_size = m->size;
   *old_size_out = old_size;
@@ -200,29 +189,29 @@ static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** o
   *old_data_out = NULL;
   LARGE_INTEGER li;
   li.QuadPart = (LONGLONG)new_size;
-  if (!SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN) || !SetEndOfFile(m->hFile)) {
+  if (!SetFilePointerEx(m->h_file, li, NULL, FILE_BEGIN) || !SetEndOfFile(m->h_file)) {
     return -1;
   }
-  HANDLE old_hMap = m->hMap;
+  HANDLE old_h_map = m->h_map;
   uint8_t* old_data = m->data;
-  HANDLE new_hMap = CreateFileMappingA(m->hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
-  if (!new_hMap) {
+  HANDLE new_h_map = CreateFileMappingA(m->h_file, NULL, PAGE_READWRITE, 0, 0, NULL);
+  if (!new_h_map) {
     li.QuadPart = (LONGLONG)old_size;
-    SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN);
-    SetEndOfFile(m->hFile);
+    SetFilePointerEx(m->h_file, li, NULL, FILE_BEGIN);
+    SetEndOfFile(m->h_file);
     return -1;
   }
-  uint8_t* new_data = (uint8_t*)MapViewOfFile(new_hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  uint8_t* new_data = (uint8_t*)MapViewOfFile(new_h_map, FILE_MAP_ALL_ACCESS, 0, 0, 0);
   if (!new_data) {
-    CloseHandle(new_hMap);
+    CloseHandle(new_h_map);
     li.QuadPart = (LONGLONG)old_size;
-    SetFilePointerEx(m->hFile, li, NULL, FILE_BEGIN);
-    SetEndOfFile(m->hFile);
+    SetFilePointerEx(m->h_file, li, NULL, FILE_BEGIN);
+    SetEndOfFile(m->h_file);
     return -1;
   }
   UnmapViewOfFile(old_data);
-  CloseHandle(old_hMap);
-  m->hMap = new_hMap;
+  CloseHandle(old_h_map);
+  m->h_map = new_h_map;
   m->data = new_data;
   m->size = new_size;
   return 0;
@@ -242,9 +231,7 @@ static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** o
 #endif
 }
 
-/**
- * Manually unmap a data region. Use for cleaning up after lighter_map_expand on Unix.
- */
+/** Unmap a previously returned mapping view. */
 static inline void lighter_map_unmap(uint8_t* data, size_t size) {
 #if LIGHTER_MEMMAP_WIN
   UnmapViewOfFile(data);
@@ -253,9 +240,7 @@ static inline void lighter_map_unmap(uint8_t* data, size_t size) {
 #endif
 }
 
-/**
- * Unmap and close. Only call after a successful lighter_map_open.
- */
+/** Unmap and close an open file mapping. */
 static inline void lighter_map_close(LighterMap* m) {
   if (!m->data) {
     return;
@@ -263,13 +248,13 @@ static inline void lighter_map_close(LighterMap* m) {
 #if LIGHTER_MEMMAP_WIN
   UnmapViewOfFile(m->data);
   m->data = NULL;
-  if (m->hMap) {
-    CloseHandle(m->hMap);
-    m->hMap = NULL;
+  if (m->h_map) {
+    CloseHandle(m->h_map);
+    m->h_map = NULL;
   }
-  if (m->hFile != INVALID_HANDLE_VALUE) {
-    CloseHandle(m->hFile);
-    m->hFile = INVALID_HANDLE_VALUE;
+  if (m->h_file != INVALID_HANDLE_VALUE) {
+    CloseHandle(m->h_file);
+    m->h_file = INVALID_HANDLE_VALUE;
   }
 #else
   munmap(m->data, m->size);

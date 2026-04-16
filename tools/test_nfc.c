@@ -1,11 +1,28 @@
 /**
  * @file   test_nfc.c
  * @brief  Test NFC normalization against official NormalizationTest.txt
+ * @usage  test_nfc <lighter.nfc> <ucd_dir>
+ *
+ * Loads the pre-built binary NFC tables (same path as the main lighterjson
+ * binary uses) and tests them against the Unicode conformance suite.
  */
 
 #include "unicode_nfc_shared.h"
 #include "unicode_nfc_runtime.h"
-#include "unicode_nfc_builder.h"
+
+/** Parse one hexadecimal code point field from a string. */
+static int nfc_parse_hex(const char* s, uint32_t* cp) {
+  *cp = 0;
+  int i = 0;
+  for (; s[i]; ++i) {
+    char c = s[i];
+    if (c >= '0' && c <= '9') { *cp = (*cp << 4) | (uint32_t)(c - '0'); }
+    else if (c >= 'A' && c <= 'F') { *cp = (*cp << 4) | (uint32_t)(c - 'A' + 10); }
+    else if (c >= 'a' && c <= 'f') { *cp = (*cp << 4) | (uint32_t)(c - 'a' + 10); }
+    else { break; }
+  }
+  return i;
+}
 
 #define MAX_CP_SEQ      64   /* max code points per NormalizationTest line */
 #define UTF8_BUF_SIZE   512
@@ -82,19 +99,22 @@ static void print_cps(const uint32_t* cps, int n) {
 }
 
 int main(int argc, char* argv[]) {
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <ucd_dir>\n", argv[0]);
+  if (argc != 3) {
+    fprintf(stderr, "Usage: %s <lighter.nfc> <ucd_dir>\n", argv[0]);
     return 1;
   }
 
-  NfcData* d = nfc_load_from_ucd(argv[1]);
+  const char* nfc_path = argv[1];
+  const char* ucd_dir  = argv[2];
+
+  NfcData* d = nfc_load_binary(nfc_path);
   if (!d) {
-    fprintf(stderr, "Failed to load UCD\n");
+    fprintf(stderr, "Failed to load NFC binary from %s\n", nfc_path);
     return 1;
   }
 
-  char path[4096];
-  snprintf(path, sizeof(path), "%s/NormalizationTest.txt", argv[1]);
+  char path[PATH_BUF_SIZE];
+  snprintf(path, sizeof(path), "%s/NormalizationTest.txt", ucd_dir);
   LighterMap map = {0};
   if (lighter_map_open(&map, path, 1) != 0) {
     fprintf(stderr, "Failed to read %s\n", path);

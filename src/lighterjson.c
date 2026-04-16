@@ -50,7 +50,6 @@ typedef struct Context {
   int disable_nfc;
   int async_io;
   int safe_mode;
-  int has_avx512;
   int has_avx2;
   int has_neon;
   int has_rvv;
@@ -69,9 +68,7 @@ typedef struct PathBuffer {
 #define LIGHTER_BOUNDARY_MASK_BITS 64u
 
 /** Advance run past a contiguous whitespace span, using SIMD when worthwhile. */
-static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  (void)has_avx512;
-  (void)has_avx2;
+static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_neon, int has_rvv) {
   (void)has_neon;
   (void)has_rvv;
   /* Use a short scalar prefix before the SIMD scan so brief whitespace runs are
@@ -92,42 +89,7 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
   if (run >= end) {
     return run;
   }
-#if LIGHTER_PLATFORM_X86
-  if (has_avx512) {
-    __m512i spaces = _mm512_set1_epi8(' ');
-    __m512i tabs = _mm512_set1_epi8('\t');
-    __m512i crs = _mm512_set1_epi8('\r');
-    __m512i lfs = _mm512_set1_epi8('\n');
-    while (run + 64 <= end) {
-      __m512i chunk = _mm512_loadu_si512((const void*)run);
-      __mmask64 mask = _mm512_cmpeq_epi8_mask(chunk, spaces) | _mm512_cmpeq_epi8_mask(chunk, tabs) | _mm512_cmpeq_epi8_mask(chunk, crs);
-      if (include_newline) {
-        mask |= _mm512_cmpeq_epi8_mask(chunk, lfs);
-      }
-      if (mask != 0xFFFFFFFFFFFFFFFFULL) {
-        return run + __builtin_ctzll(~mask);
-      }
-      run += 64;
-    }
-  } else if (has_avx2) {
-    __m256i spaces = _mm256_set1_epi8(' ');
-    __m256i tabs = _mm256_set1_epi8('\t');
-    __m256i crs = _mm256_set1_epi8('\r');
-    __m256i lfs = _mm256_set1_epi8('\n');
-    while (run + 32 <= end) {
-      __m256i chunk = _mm256_loadu_si256((const __m256i*)run);
-      __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, spaces), _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs), _mm256_cmpeq_epi8(chunk, crs)));
-      if (include_newline) {
-        m = _mm256_or_si256(m, _mm256_cmpeq_epi8(chunk, lfs));
-      }
-      uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
-      if (mask != 0xFFFFFFFF) {
-        return run + __builtin_ctz(~mask);
-      }
-      run += 32;
-    }
-  }
-#elif LIGHTER_PLATFORM_ARM64
+#if LIGHTER_PLATFORM_ARM64
   if (has_neon) {
     uint8x16_t spaces = vdupq_n_u8(' ');
     uint8x16_t tabs = vdupq_n_u8('\t');
@@ -184,7 +146,7 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
 
 /** Skip the whitespace run at rindex and flush any preceding output. */
 void skip_whitespace_run(LighterData* data, int include_newline, Context* ctx) {
-  uint8_t* run = skip_whitespace_impl(data->rindex, data->data_end, include_newline, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+  uint8_t* run = skip_whitespace_impl(data->rindex, data->data_end, include_newline, ctx->has_neon, ctx->has_rvv);
   lighter_write_data(data, run - data->rindex);
 }
 
@@ -199,12 +161,12 @@ void do_literal(LighterData* data, const char* literal, size_t length) {
 
 /** Dispatch JSON string parsing with the current context flags. */
 static void do_string(LighterData* data, Context* ctx) {
-  lighter_do_string(data, ctx->disable_nfc, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+  lighter_do_string(data, ctx->disable_nfc, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
 /** Dispatch JSON number parsing with the current precision and CPU flags. */
 static void do_number(LighterData* data, Context* ctx) {
-  lighter_do_number_impl(data, ctx->precision, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+  lighter_do_number_impl(data, ctx->precision, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
 /** Parse an object key or detect the end of the current object. */
@@ -287,17 +249,13 @@ static inline void do_value_handle_byte(LighterData* data, Context* ctx, int* li
 }
 
 /** Fast-path value scan for non-safe mode. */
-static inline void do_value_blind_impl(LighterData* data, Context* ctx, int line_start, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+static inline void do_value_blind_impl(LighterData* data, Context* ctx, int line_start) {
   /* Scan for the next "interesting" byte: whitespace, '"', '-', or a digit.
    * Everything else (structural {}[]:, and literals tfn) is a no-op in the scalar
    * dispatcher, so this loop advances until one of those bytes is found.
    *
    * Membership uses a rebased 64-bit bitmask over the byte range [0x09, 0x39].
    * Whitespace runs are handled separately by skip_whitespace_run. */
-  (void)has_avx512;
-  (void)has_avx2;
-  (void)has_neon;
-  (void)has_rvv;
   /* Mask bits for rebased positions (c - 0x09) of each target byte. */
   const uint64_t boundary_mask = (1ULL << ('\t' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('\n' - LIGHTER_BOUNDARY_BASE)) |
                                  (1ULL << ('\r' - LIGHTER_BOUNDARY_BASE)) | (1ULL << (' ' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('"' - LIGHTER_BOUNDARY_BASE)) |
@@ -329,7 +287,7 @@ static inline void do_value_blind_impl(LighterData* data, Context* ctx, int line
 /** Parse values from the current position, optionally with structural recovery. */
 static int do_value(LighterData* data, Context* ctx, int line_start) {
   if (!ctx->safe_mode) {
-    do_value_blind_impl(data, ctx, line_start, ctx->has_avx512, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+    do_value_blind_impl(data, ctx, line_start);
     return 0;
   }
   Bitfield parent_types;
@@ -558,7 +516,7 @@ static int do_dir_win(Context* ctx, PathBuffer* pb) {
     free(long_wpath);
     return EXIT_FAILURE;
   }
-  wcscpy(search_path, long_wpath);
+  memcpy(search_path, long_wpath, (wplen + 1) * sizeof(wchar_t));
 
   if (wplen > 0 && search_path[wplen - 1] != L'\\' && search_path[wplen - 1] != L'/') {
     search_path[wplen] = L'\\';
@@ -695,6 +653,7 @@ void usage(char progname[], int status) {
 }
 
 /** Parse command-line options and process the requested file or directory. */
+#ifndef LIGHTER_NO_MAIN
 int main(int argc, char* argv[]) {
   int negative = 0;
   Context ctx = {
@@ -705,7 +664,6 @@ int main(int argc, char* argv[]) {
       .async_io = 0,
       .safe_mode = 0,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
-      .has_avx512 = lighter_cpu_supports_avx512bw(),
       .has_avx2 = lighter_cpu_supports_avx2(),
       .has_neon = lighter_cpu_supports_neon(),
       .has_rvv = lighter_cpu_supports_rvv(),
@@ -822,7 +780,7 @@ int main(int argc, char* argv[]) {
     if (!pb.buf) {
       return EXIT_FAILURE;
     }
-    strcpy(pb.buf, argv[optind_val]);
+    memcpy(pb.buf, argv[optind_val], arg_len + 1);
     int ret = do_dir(&ctx, &pb);
     free(pb.buf);
     return ret;
@@ -840,7 +798,7 @@ int main(int argc, char* argv[]) {
     if (!pb.buf) {
       return EXIT_FAILURE;
     }
-    strcpy(pb.buf, argv[optind_val]);
+    memcpy(pb.buf, argv[optind_val], arg_len + 1);
     int ret = do_dir(&ctx, &pb);
     free(pb.buf);
     return ret;
@@ -848,3 +806,4 @@ int main(int argc, char* argv[]) {
 #endif
   return do_file(&ctx, argv[optind_val]);
 }
+#endif /* LIGHTER_NO_MAIN */

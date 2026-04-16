@@ -907,33 +907,12 @@ static inline NfcData* nfc_get_or_load(const char* path) {
 /* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
 
 /** Return the NFC quick-check result for the UTF-8 span [start, end). */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_neon, int has_rvv) {
   const uint8_t* p = start;
   int found_high = 0;
 
-#if LIGHTER_PLATFORM_X86
-  if (has_avx512) {
-    while (p + 64 <= end) {
-      __m512i chunk = _mm512_loadu_si512((const void*)p);
-      if (_mm512_test_epi8_mask(chunk, _mm512_set1_epi8(0x80)) != 0) {
-        found_high = 1;
-        break;
-      }
-      p += 64;
-    }
-  } else if (has_avx2) {
-    while (p + 32 <= end) {
-      __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
-      if (_mm256_movemask_epi8(chunk) != 0) {
-        found_high = 1;
-        break;
-      }
-      p += 32;
-    }
-  } else
-#endif
 #if LIGHTER_PLATFORM_ARM64
-      if (has_neon) {
+  if (has_neon) {
     while (p + 16 <= end) {
       uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
       /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */

@@ -66,11 +66,11 @@ static inline wchar_t* lighter_make_long_path_w(const char* utf8_path) {
   }
 
   if (is_unc) {
-    wcscpy(long_wpath, L"\\\\?\\UNC\\");
-    wcscat(long_wpath, full_wpath + 2);
+    memcpy(long_wpath,     L"\\\\?\\UNC\\",  8 * sizeof(wchar_t));
+    memcpy(long_wpath + 8, full_wpath + 2, (full_len - 2) * sizeof(wchar_t));
   } else {
-    wcscpy(long_wpath, L"\\\\?\\");
-    wcscat(long_wpath, full_wpath);
+    memcpy(long_wpath,     L"\\\\?\\", 4 * sizeof(wchar_t));
+    memcpy(long_wpath + 4, full_wpath,    full_len * sizeof(wchar_t));
   }
   free(full_wpath);
   return long_wpath;
@@ -104,7 +104,7 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
     return -1;
   }
   LARGE_INTEGER li;
-  if (!GetFileSizeEx(h, &li) || li.QuadPart <= 0 || (read_only && li.QuadPart > (LONGLONG)((size_t)-1))) {
+  if (!GetFileSizeEx(h, &li) || li.QuadPart <= 0 || (read_only && (ULONGLONG)li.QuadPart > (size_t)-1)) {
     if (!read_only) {
       fprintf(stderr, "Could not get file size\n");
     }
@@ -173,6 +173,14 @@ static inline int lighter_map_sync(LighterMap* m, size_t len, int async_io) {
 /** Truncate the mapped file to len bytes. */
 static inline int lighter_map_truncate(LighterMap* m, size_t len) {
 #if LIGHTER_MEMMAP_WIN
+  /* Windows forbids SetEndOfFile while any MapViewOfFile is active on the
+   * file.  Flush, unmap, and close the mapping object first; the caller
+   * must not access m->data after this returns. */
+  FlushViewOfFile(m->data, len);
+  UnmapViewOfFile(m->data);
+  m->data = NULL;
+  CloseHandle(m->h_map);
+  m->h_map = NULL;
   LARGE_INTEGER li;
   li.QuadPart = (LONGLONG)len;
   return (SetFilePointerEx(m->h_file, li, NULL, FILE_BEGIN) && SetEndOfFile(m->h_file)) ? 0 : -1;
@@ -242,21 +250,25 @@ static inline void lighter_map_unmap(uint8_t* data, size_t size) {
 
 /** Unmap and close an open file mapping. */
 static inline void lighter_map_close(LighterMap* m) {
-  if (!m->data) {
-    return;
-  }
 #if LIGHTER_MEMMAP_WIN
-  UnmapViewOfFile(m->data);
-  m->data = NULL;
+  /* lighter_map_truncate may have already unmapped and released h_map;
+   * handle each resource independently so nothing is leaked. */
+  if (m->data) {
+    UnmapViewOfFile(m->data);
+    m->data = NULL;
+  }
   if (m->h_map) {
     CloseHandle(m->h_map);
     m->h_map = NULL;
   }
-  if (m->h_file != INVALID_HANDLE_VALUE) {
+  if (m->h_file && m->h_file != INVALID_HANDLE_VALUE) {
     CloseHandle(m->h_file);
     m->h_file = INVALID_HANDLE_VALUE;
   }
 #else
+  if (!m->data) {
+    return;
+  }
   munmap(m->data, m->size);
   m->data = NULL;
   if (m->fd >= 0) {

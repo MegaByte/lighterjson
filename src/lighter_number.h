@@ -87,11 +87,13 @@ static inline uint32_t lighter_digits_u64(uint64_t n) {
 
 #if LIGHTER_PLATFORM_X86
 /** Returns a mask of bytes that are digits '0'-'9'. */
+LIGHTER_TARGET_AVX2
 static inline __m256i lighter_simd_is_digit_avx2(__m256i chunk) {
   return _mm256_and_si256(_mm256_cmpgt_epi8(chunk, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), chunk));
 }
 
 /** Collapse an AVX2 byte mask to a 32-bit lane mask. */
+LIGHTER_TARGET_AVX2
 static inline uint32_t lighter_simd_mask_avx2(__m256i m) {
   return (uint32_t)_mm256_movemask_epi8(m);
 }
@@ -104,6 +106,17 @@ static inline uint32_t lighter_simd_first_set_avx2(uint32_t mask) {
   return (uint32_t)offset;
   #else
   return (uint32_t)__builtin_ctz(mask);
+  #endif
+}
+
+/** Return the index of the last set bit in an AVX2 mask. */
+static inline uint32_t lighter_simd_last_set_avx2(uint32_t mask) {
+  #if defined(_MSC_VER)
+  unsigned long offset;
+  _BitScanReverse(&offset, mask);
+  return (uint32_t)offset;
+  #else
+  return 31u - (uint32_t)__builtin_clz(mask);
   #endif
 }
 #endif
@@ -273,9 +286,8 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
 }
 
 /** Parse, normalize, and rewrite the JSON number at rindex. */
-static inline void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
-  (void)has_avx512;
-  (void)has_avx2;
+LIGHTER_TARGET_AVX2
+static void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx2, int has_neon, int has_rvv) {
   (void)has_neon;
   (void)has_rvv;
   uint8_t* decimal = 0;
@@ -363,7 +375,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
               if (LIGHTER_LIKELY(!non_zero_start)) {
                 non_zero_start = i + lighter_simd_first_set_avx2(bits);
               }
-              non_zero_finish = i + 31 - (uint32_t)__builtin_clz(bits);
+              non_zero_finish = i + lighter_simd_last_set_avx2(bits);
             }
           }
         }
@@ -378,7 +390,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
             if (LIGHTER_LIKELY(!non_zero_start)) {
               non_zero_start = i + lighter_simd_first_set_avx2(mask_nonzero);
             }
-            non_zero_finish = i + 31 - (uint32_t)__builtin_clz(mask_nonzero);
+            non_zero_finish = i + lighter_simd_last_set_avx2(mask_nonzero);
           }
         }
         i += 32;
@@ -866,8 +878,7 @@ static inline void lighter_do_number_impl(LighterData* data, int64_t precision, 
 
 /** Parse and optionally reformat a JSON number. precision: LIGHTER_PRECISION_UNLIMITED = preserve form. */
 static inline void lighter_do_number(LighterData* data, int64_t precision) {
-  lighter_do_number_impl(data, precision, lighter_cpu_supports_avx512bw(), lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(),
-                         lighter_cpu_supports_rvv());
+  lighter_do_number_impl(data, precision, lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(), lighter_cpu_supports_rvv());
 }
 
 #endif /* LIGHTER_NUMBER_H */

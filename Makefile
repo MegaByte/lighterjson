@@ -28,8 +28,8 @@ ucd: ucd/UnicodeData.txt ucd/DerivedNormalizationProps.txt ucd/CompositionExclus
 test_nfc: tools/test_nfc.c src/unicode_nfc_shared.h src/unicode_nfc_runtime.h src/unicode_nfc_builder.h
 	$(CC) $(CFLAGS) -Isrc -o test_nfc tools/test_nfc.c
 
-test: test_nfc ucd
-	./test_nfc ucd
+test: test_nfc lighter.nfc ucd
+	./test_nfc lighter.nfc ucd
 
 test-json: lighterjson lighter.nfc
 	./testdata/run_json_tests.sh

@@ -165,42 +165,6 @@ static inline void lighter_string_do_escape(LighterData* data) {
 #include "lighter_cpu.h"
 
 #if LIGHTER_PLATFORM_X86
-LIGHTER_TARGET_AVX512
-/** Advance to the next quote or backslash with an AVX512 scan. */
-static inline void lighter_simd_avx512_string_skip(LighterData* data, int* saw_non_ascii) {
-  const __m512i quote = _mm512_set1_epi8('"');
-  const __m512i escape = _mm512_set1_epi8('\\');
-  while (data->rindex + 64 <= data->data_end) {
-    __m512i chunk = _mm512_loadu_si512((const void*)data->rindex);
-    if (!*saw_non_ascii && _mm512_test_epi8_mask(chunk, _mm512_set1_epi8((char)0x80)) != 0) {
-      *saw_non_ascii = 1;
-    }
-    __mmask64 test_either = _mm512_cmpeq_epi8_mask(chunk, quote) | _mm512_cmpeq_epi8_mask(chunk, escape);
-    if (test_either == 0) {
-      data->rindex += 64;
-      continue;
-    }
-  #if defined(_MSC_VER)
-    unsigned long offset;
-    #if defined(_M_X64)
-    _BitScanForward64(&offset, test_either);
-    data->rindex += offset;
-    #else
-    if ((uint32_t)test_either != 0) {
-      _BitScanForward(&offset, (uint32_t)test_either);
-      data->rindex += offset;
-    } else {
-      _BitScanForward(&offset, (uint32_t)(test_either >> 32));
-      data->rindex += offset + 32;
-    }
-    #endif
-  #else
-    data->rindex += __builtin_ctzll(test_either);
-  #endif
-    return;
-  }
-}
-
 LIGHTER_TARGET_AVX2
 /** Advance to the next quote or backslash with an AVX2 scan. */
 static inline void lighter_simd_avx2_string_skip(LighterData* data, int* saw_non_ascii) {
@@ -296,7 +260,7 @@ static inline void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_
 #endif
 
 /** Finalize parsing when rindex is positioned at the string tail or closing quote. */
-static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv, int saw_non_ascii) {
+static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_neon, int has_rvv, int saw_non_ascii) {
   if (data->rindex >= data->data_end) {
     return 1;
   }
@@ -309,7 +273,7 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
        * Content is [lindex+1, rindex). Flush the pending segment (opening quote plus
        * content), then normalize the content in place if needed. */
       if (!disable_nfc && saw_non_ascii &&
-          nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_avx512, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
+          nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_neon, has_rvv) != NFC_QC_YES) {
         ptrdiff_t pending = data->rindex - data->lindex;
         lighter_write_data(data, 1); /* flush [opening quote .. content), consume closing quote */
         /* After flush: windex moved forward by `pending` bytes; output now has
@@ -332,24 +296,15 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
 }
 
 /** Parse the JSON string at rindex and optionally NFC-normalize its content. */
-static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx512, int has_avx2, int has_neon, int has_rvv) {
+static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv) {
   ++(data->rindex);
   int saw_non_ascii = 0;
 
 #if LIGHTER_PLATFORM_X86
-  if (has_avx512) {
-    while (data->rindex < data->data_end) {
-      lighter_simd_avx512_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_avx512, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
-        return;
-      }
-    }
-    return;
-  }
   if (has_avx2) {
     while (data->rindex < data->data_end) {
       lighter_simd_avx2_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_avx512, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
         return;
       }
     }
@@ -367,7 +322,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   if (has_rvv) {
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_avx512, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
         return;
       }
     }
@@ -391,7 +346,13 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
       e = (e - 0x0101010101010101ULL) & ~e & 0x8080808080808080ULL;
       uint64_t m = q | e;
       if (m) {
+#if defined(_MSC_VER)
+        unsigned long offset;
+        _BitScanForward64(&offset, m);
+        data->rindex += (size_t)(offset >> 3);
+#else
         data->rindex += (size_t)(__builtin_ctzll(m) >> 3);
+#endif
         break;
       }
       data->rindex += 8;
@@ -407,7 +368,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
       }
       ++data->rindex;
     }
-    if (lighter_string_tail_at_end(data, disable_nfc, has_avx512, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+    if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
       return;
     }
   }

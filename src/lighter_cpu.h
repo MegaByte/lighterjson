@@ -21,14 +21,11 @@
   #if defined(_MSC_VER)
     #include <intrin.h>
     #define LIGHTER_TARGET_AVX2
-    #define LIGHTER_TARGET_AVX512
   #elif defined(__GNUC__) || defined(__clang__)
     #include <immintrin.h>
     #define LIGHTER_TARGET_AVX2 __attribute__((target("avx2")))
-    #define LIGHTER_TARGET_AVX512 __attribute__((target("avx512bw")))
   #else
     #define LIGHTER_TARGET_AVX2
-    #define LIGHTER_TARGET_AVX512
   #endif
 
 /** Return non-zero when AVX2 is available on the current x86 CPU. */
@@ -49,35 +46,12 @@ static inline int lighter_cpu_supports_avx2(void) {
   #endif
 }
 
-/** Return non-zero when AVX512BW is available on the current x86 CPU. */
-static inline int lighter_cpu_supports_avx512bw(void) {
-  #if defined(_MSC_VER)
-  int cpu_info[4];
-  __cpuid(cpu_info, 0);
-  if (cpu_info[0] >= 7) {
-    __cpuidex(cpu_info, 7, 0);
-    return (cpu_info[1] & (1 << 30)) != 0; /* bit 30 in EBX for AVX512BW */
-  }
-  return 0;
-  #elif defined(__GNUC__) || defined(__clang__)
-  __builtin_cpu_init();
-  return __builtin_cpu_supports("avx512bw");
-  #else
-  return 0;
-  #endif
-}
-
 #else
 
   #define LIGHTER_PLATFORM_X86 0
   #define LIGHTER_TARGET_AVX2
-  #define LIGHTER_TARGET_AVX512
 /** Return 0 when x86 runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_avx2(void) {
-  return 0;
-}
-/** Return 0 when x86 runtime probing is unavailable on this build. */
-static inline int lighter_cpu_supports_avx512bw(void) {
   return 0;
 }
 

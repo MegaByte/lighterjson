@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 /* RLE: escape 0x00 = literal 0xFF; escape n (3<=n<=255) + byte = run of n. */
 #define RLE_ESCAPE         0xFF
@@ -80,6 +84,9 @@ int main(int argc, char* argv[]) {
   }
 
   char* ucd_dir = argv[1];
+#ifdef _WIN32
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
   NfcData* d = nfc_load_from_ucd(ucd_dir);
   if (!d) {
     fprintf(stderr, "Failed to load UCD from %s\n", ucd_dir);

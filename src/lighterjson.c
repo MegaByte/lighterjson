@@ -49,7 +49,6 @@ typedef struct Context {
   int newlines;
   int disable_nfc;
   int async_io;
-  int safe_mode;
   int has_avx2;
   int has_neon;
   int has_rvv;
@@ -64,8 +63,6 @@ typedef struct PathBuffer {
 #define LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR 3u
 #define LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR 2u
 #define LIGHTER_TRANSCODE_SLACK_BYTES 4u
-#define LIGHTER_BOUNDARY_BASE 0x09u
-#define LIGHTER_BOUNDARY_MASK_BITS 64u
 
 #if LIGHTER_PLATFORM_X86
 /** Advance run past a contiguous whitespace span with AVX2. */
@@ -225,7 +222,10 @@ static int do_object_label(LighterData* data, Context* ctx, int line_start) {
         skip_whitespace_run(data, 1, ctx);
         break;
       default:
-        lighter_write_data(data, 1);
+        /* Drop invalid byte before key. */
+        lighter_write_data(data, 0);
+        ++(data->rindex);
+        data->lindex = data->rindex;
     }
   }
   return 1;
@@ -254,77 +254,16 @@ static void do_object(LighterData* data, Context* ctx, int line_start) {
         skip_whitespace_run(data, 1, ctx);
         break;
       default:
-        lighter_write_data(data, 1);
-    }
-  }
-}
-
-/** Handle one structural byte reached by the blind value scanner. */
-static inline void do_value_handle_byte(LighterData* data, Context* ctx, int* line_start) {
-  uint8_t c = *data->rindex;
-  if (c == '"') {
-    do_string(data, ctx);
-  } else if (c == '-' || ((unsigned)(c - '0') <= 9)) {
-    do_number(data, ctx);
-  } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-    if (c == '\n') {
-      if (*line_start == 1) {
-        --(*line_start);
-      } else if (*line_start == 2) {
+        /* Drop invalid byte between key and ':'. */
+        lighter_write_data(data, 0);
         ++(data->rindex);
-      } else {
-        skip_whitespace_run(data, 1, ctx);
-      }
-    } else {
-      skip_whitespace_run(data, *line_start ? 0 : 1, ctx);
+        data->lindex = data->rindex;
     }
-  } else {
-    ++(data->rindex);
   }
 }
 
-/** Fast-path value scan for non-safe mode. */
-static inline void do_value_blind_impl(LighterData* data, Context* ctx, int line_start) {
-  /* Scan for the next "interesting" byte: whitespace, '"', '-', or a digit.
-   * Everything else (structural {}[]:, and literals tfn) is a no-op in the scalar
-   * dispatcher, so this loop advances until one of those bytes is found.
-   *
-   * Membership uses a rebased 64-bit bitmask over the byte range [0x09, 0x39].
-   * Whitespace runs are handled separately by skip_whitespace_run. */
-  /* Mask bits for rebased positions (c - 0x09) of each target byte. */
-  const uint64_t boundary_mask = (1ULL << ('\t' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('\n' - LIGHTER_BOUNDARY_BASE)) |
-                                 (1ULL << ('\r' - LIGHTER_BOUNDARY_BASE)) | (1ULL << (' ' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('"' - LIGHTER_BOUNDARY_BASE)) |
-                                 (1ULL << ('-' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('0' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('1' - LIGHTER_BOUNDARY_BASE)) |
-                                 (1ULL << ('2' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('3' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('4' - LIGHTER_BOUNDARY_BASE)) |
-                                 (1ULL << ('5' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('6' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('7' - LIGHTER_BOUNDARY_BASE)) |
-                                 (1ULL << ('8' - LIGHTER_BOUNDARY_BASE)) | (1ULL << ('9' - LIGHTER_BOUNDARY_BASE));
-  const uint8_t* end = data->data_end;
-  while (data->rindex < end) {
-    uint8_t* p = data->rindex;
-    while (p < end) {
-      uint8_t d = (uint8_t)(*p - LIGHTER_BOUNDARY_BASE);
-      /* Rebased to the boundary-mask range; wider values fail the bit test
-       * naturally because boundary_mask has no bits set above it. Guard against
-       * shift-by-large-value (UB for shift >= LIGHTER_BOUNDARY_MASK_BITS). */
-      if (d < LIGHTER_BOUNDARY_MASK_BITS && ((boundary_mask >> d) & 1ULL)) {
-        break;
-      }
-      ++p;
-    }
-    data->rindex = p;
-    if (data->rindex >= end) {
-      return;
-    }
-    do_value_handle_byte(data, ctx, &line_start);
-  }
-}
-
-/** Parse values from the current position, optionally with structural recovery. */
+/** Parse values from the current position with structural tracking and garbage recovery. */
 static int do_value(LighterData* data, Context* ctx, int line_start) {
-  if (!ctx->safe_mode) {
-    do_value_blind_impl(data, ctx, line_start);
-    return 0;
-  }
   Bitfield parent_types;
   init_bits(&parent_types);
   int comma_ok = 0;
@@ -416,8 +355,13 @@ static int do_value(LighterData* data, Context* ctx, int line_start) {
       case '\r':
         skip_whitespace_run(data, line_start ? 0 : 1, ctx);
         break;
-      default: /* invalid */
-        lighter_write_data(data, 1);
+      default:
+        /* Invalid byte outside any value: drop it. Flush anything pending first
+         * so legitimate prior bytes aren't lost, then advance past the garbage
+         * without including it in the next pending segment. */
+        lighter_write_data(data, 0);
+        ++(data->rindex);
+        data->lindex = data->rindex;
     }
   }
   if (parent_types.bits != &parent_types.initial_bits) {
@@ -681,7 +625,6 @@ void usage(char progname[], int status) {
           "  -N   Process NDJSON, preserving empty lines\n"
           "  -a   Use asynchronous memory mapped I/O\n"
           "  -U   Disable Unicode normalization\n"
-          "  -s   Safe mode. Enable strict structural tracking to gracefully parse broken streams\n"
           "  -q   Suppress output\n",
           progname);
   exit(status);
@@ -697,7 +640,6 @@ int main(int argc, char* argv[]) {
       .newlines = 0,
       .disable_nfc = 0,
       .async_io = 0,
-      .safe_mode = 0,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
       .has_avx2 = lighter_cpu_supports_avx2(),
       .has_neon = lighter_cpu_supports_neon(),
@@ -732,9 +674,6 @@ int main(int argc, char* argv[]) {
           break;
         case 'U':
           ctx.disable_nfc = 1;
-          break;
-        case 's':
-          ctx.safe_mode = 1;
           break;
         case 'a':
           ctx.async_io = 1;

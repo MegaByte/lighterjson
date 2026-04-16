@@ -36,9 +36,9 @@ static inline void init_bits(Bitfield* bitfield) {
   bitfield->current = -1;
 }
 
-/* bit_level/byte_level point at the NEXT free slot. After push, the most recently
- * written bit is at (prev position). `current` caches that bit. Empty stack has current=-1. */
-/** Advance the stack cursor by one bit, growing storage if needed. */
+/** Advance the stack cursor by one bit, growing storage if needed.
+ * bit_level/byte_level point at the next free slot, and current caches the
+ * most recently written bit value. */
 static inline void increment_bit(Bitfield* bitfield) {
   if (bitfield->bit_level == sizeof(uint64_t) * CHAR_BIT - 1) {
     bitfield->bit_level = 0;

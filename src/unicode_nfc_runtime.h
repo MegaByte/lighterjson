@@ -156,7 +156,9 @@ static inline int nfc_decompose_one(const NfcData* d, uint32_t cp, uint32_t* out
   }
 
   uint32_t idx = 0;
-  if (d->decomp_sparse && d->decomp_sparse_count > 0) {
+  if (d->decomp_idx) {
+    idx = d->decomp_idx[cp];
+  } else if (d->decomp_sparse && d->decomp_sparse_count > 0) {
     size_t l = 0;
     size_t h = d->decomp_sparse_count;
     while (l < h) {

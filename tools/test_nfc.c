@@ -7,8 +7,8 @@
  * binary uses) and tests them against the Unicode conformance suite.
  */
 
-#include "unicode_nfc_shared.h"
 #include "unicode_nfc_runtime.h"
+#include "unicode_nfc_shared.h"
 
 /** Parse one hexadecimal code point field from a string. */
 static int nfc_parse_hex(const char* s, uint32_t* cp) {
@@ -16,18 +16,23 @@ static int nfc_parse_hex(const char* s, uint32_t* cp) {
   int i = 0;
   for (; s[i]; ++i) {
     char c = s[i];
-    if (c >= '0' && c <= '9') { *cp = (*cp << 4) | (uint32_t)(c - '0'); }
-    else if (c >= 'A' && c <= 'F') { *cp = (*cp << 4) | (uint32_t)(c - 'A' + 10); }
-    else if (c >= 'a' && c <= 'f') { *cp = (*cp << 4) | (uint32_t)(c - 'a' + 10); }
-    else { break; }
+    if (c >= '0' && c <= '9') {
+      *cp = (*cp << 4) | (uint32_t)(c - '0');
+    } else if (c >= 'A' && c <= 'F') {
+      *cp = (*cp << 4) | (uint32_t)(c - 'A' + 10);
+    } else if (c >= 'a' && c <= 'f') {
+      *cp = (*cp << 4) | (uint32_t)(c - 'a' + 10);
+    } else {
+      break;
+    }
   }
   return i;
 }
 
-#define MAX_CP_SEQ      64   /* max code points per NormalizationTest line */
-#define UTF8_BUF_SIZE   512
-#define PATH_BUF_SIZE   4096
-#define MAX_FAIL_PRINT  20   /* max number of failure lines to print */
+#define MAX_CP_SEQ 64 /* max code points per NormalizationTest line */
+#define UTF8_BUF_SIZE 512
+#define PATH_BUF_SIZE 4096
+#define MAX_FAIL_PRINT 20 /* max number of failure lines to print */
 
 static int parse_cp_sequence(const char* s, uint32_t* cps, int max) {
   int n = 0;
@@ -50,13 +55,12 @@ static int parse_cp_sequence(const char* s, uint32_t* cps, int max) {
 }
 
 /* Encode a code point sequence to UTF-8 */
-static int cps_to_utf8(const uint32_t* cps, int ncps, uint8_t* buf,
-                       int bufsize) {
+static int cps_to_utf8(const uint32_t* cps, int ncps, uint8_t* buf, int bufsize) {
   int written = 0;
   for (int i = 0; i < ncps; ++i) {
     int n = nfc_utf8_encode(buf + written, cps[i]);
     written += n;
-    if (written >= bufsize - 4) {  /* leave room for one more 4-byte char */
+    if (written >= bufsize - 4) { /* leave room for one more 4-byte char */
       break;
     }
   }
@@ -105,7 +109,7 @@ int main(int argc, char* argv[]) {
   }
 
   const char* nfc_path = argv[1];
-  const char* ucd_dir  = argv[2];
+  const char* ucd_dir = argv[2];
 
   NfcData* d = nfc_load_binary(nfc_path);
   if (!d) {
@@ -171,8 +175,7 @@ int main(int argc, char* argv[]) {
     int utf8_len = cps_to_utf8(source, nsrc, utf8_buf, sizeof(utf8_buf));
 
     /* Normalize */
-    uint8_t* new_end =
-        nfc_normalize_utf8_incremental(d, utf8_buf, utf8_buf + utf8_len);
+    uint8_t* new_end = nfc_normalize_utf8_incremental(d, utf8_buf, utf8_buf + utf8_len);
     int new_len = (int)(new_end - utf8_buf);
 
     /* Decode back */

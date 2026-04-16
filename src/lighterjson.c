@@ -762,7 +762,7 @@ int main(int argc, char* argv[]) {
     usage(argv[0], EXIT_FAILURE);
   }
 
-#if LIGHTER_PLATFORM_WIN
+  #if LIGHTER_PLATFORM_WIN
   DWORD att = INVALID_FILE_ATTRIBUTES;
   wchar_t* wpath = lighter_make_long_path_w(argv[optind_val]);
   if (wpath) {
@@ -785,7 +785,7 @@ int main(int argc, char* argv[]) {
     free(pb.buf);
     return ret;
   }
-#else
+  #else
   struct stat sb;
   if (stat(argv[optind_val], &sb) == 0 && (sb.st_mode & S_IFDIR)) {
     PathBuffer pb;
@@ -803,7 +803,7 @@ int main(int argc, char* argv[]) {
     free(pb.buf);
     return ret;
   }
-#endif
+  #endif
   return do_file(&ctx, argv[optind_val]);
 }
 #endif /* LIGHTER_NO_MAIN */

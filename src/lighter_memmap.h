@@ -66,11 +66,11 @@ static inline wchar_t* lighter_make_long_path_w(const char* utf8_path) {
   }
 
   if (is_unc) {
-    memcpy(long_wpath,     L"\\\\?\\UNC\\",  8 * sizeof(wchar_t));
+    memcpy(long_wpath, L"\\\\?\\UNC\\", 8 * sizeof(wchar_t));
     memcpy(long_wpath + 8, full_wpath + 2, (full_len - 2) * sizeof(wchar_t));
   } else {
-    memcpy(long_wpath,     L"\\\\?\\", 4 * sizeof(wchar_t));
-    memcpy(long_wpath + 4, full_wpath,    full_len * sizeof(wchar_t));
+    memcpy(long_wpath, L"\\\\?\\", 4 * sizeof(wchar_t));
+    memcpy(long_wpath + 4, full_wpath, full_len * sizeof(wchar_t));
   }
   free(full_wpath);
   return long_wpath;

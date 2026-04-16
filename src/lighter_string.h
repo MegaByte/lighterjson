@@ -272,8 +272,7 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
       /* lindex points at the opening quote; rindex points at the closing quote.
        * Content is [lindex+1, rindex). Flush the pending segment (opening quote plus
        * content), then normalize the content in place if needed. */
-      if (!disable_nfc && saw_non_ascii &&
-          nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_neon, has_rvv) != NFC_QC_YES) {
+      if (!disable_nfc && saw_non_ascii && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_neon, has_rvv) != NFC_QC_YES) {
         ptrdiff_t pending = data->rindex - data->lindex;
         lighter_write_data(data, 1); /* flush [opening quote .. content), consume closing quote */
         /* After flush: windex moved forward by `pending` bytes; output now has

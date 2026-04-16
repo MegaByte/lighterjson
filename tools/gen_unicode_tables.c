@@ -4,30 +4,31 @@
  * @usage  gen_unicode_tables <ucd_dir> > lighter.nfc
  */
 
-#include "unicode_nfc_builder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "unicode_nfc_builder.h"
 #ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
+  #include <fcntl.h>
+  #include <io.h>
 #endif
 
 /* RLE: escape 0x00 = literal 0xFF; escape n (3<=n<=255) + byte = run of n. */
-#define RLE_ESCAPE         0xFF
-#define RLE_LITERAL_FF     0x00
-#define RLE_MIN_RUN        3
-#define RLE_MAX_RUN        255
-#define RLE_LITERAL_BYTES  2
-#define RLE_RUN_BYTES      3
+#define RLE_ESCAPE 0xFF
+#define RLE_LITERAL_FF 0x00
+#define RLE_MIN_RUN 3
+#define RLE_MAX_RUN 255
+#define RLE_LITERAL_BYTES 2
+#define RLE_RUN_BYTES 3
 
 /* Binary layout (must match runtime; shared defines NFC_HEADER_SIZE, NFC_* layout). */
-#define ALIGN_U16                 2
-#define ALIGN_U32                 4
-#define BITS_PER_BYTE             8
-#define DECOMP_LEN_BYTES          1
-#define DECOMP_CP_BYTES           3
-#define U16_MAX                   0xFFFFu
+#define ALIGN_U16 2
+#define ALIGN_U32 4
+#define BITS_PER_BYTE 8
+#define DECOMP_LEN_BYTES 1
+#define DECOMP_CP_BYTES 3
+#define U16_MAX 0xFFFFu
 
 /* Returns malloc'd buffer; *out_len = compressed size. Caller free()s. */
 static uint8_t* rle_encode(const uint8_t* src, size_t len, size_t* out_len) {
@@ -96,8 +97,7 @@ int main(int argc, char* argv[]) {
   fprintf(stderr,
           "Trie CCC: %u blocks, Trie QC: %u blocks, Decompositions: %zu "
           "entries, Compositions: %zu entries (comp table size %zu)\n",
-          d->stage2_blocks_ccc, d->stage2_blocks_qc, d->decomp_data_len,
-          d->comp_size, d->comp_size);
+          d->stage2_blocks_ccc, d->stage2_blocks_qc, d->decomp_data_len, d->comp_size, d->comp_size);
 
   /* Count sparse decomp entries for header */
   size_t nz = 0;
@@ -206,7 +206,7 @@ int main(int argc, char* argv[]) {
   offset += nz * NFC_DECOMP_SPARSE_ENTRY_BYTES;
 
   size_t decomp_packed = 0;
-  for (size_t i = 1; i < d->decomp_data_len; ) {
+  for (size_t i = 1; i < d->decomp_data_len;) {
     uint32_t len = d->decomp_data[i];
     decomp_packed += DECOMP_LEN_BYTES + DECOMP_CP_BYTES * (size_t)len;
     i += DECOMP_LEN_BYTES + (size_t)len;
@@ -223,15 +223,37 @@ int main(int argc, char* argv[]) {
 
   FILE* f = stdout;
   enum {
-    H_MAGIC = 0, H_VERSION = 4, H_OFF_S1_TOP = 8, H_OFF_S1_CHUNKS = 12,
-    H_OFF_PAIR_CCC = 16, H_OFF_PAIR_QC = 20, H_OFF_S2_CCC_OFF = 24,
-    H_OFF_S2_CCC_VAL = 28, H_OFF_S2_CCC_CHK = 32, H_OFF_S2_QC_OFF = 36,
-    H_OFF_S2_QC_VAL = 40, H_OFF_S2_QC_CHK = 44, H_OFF_DECOMP_SPARSE = 48,
-    H_OFF_DECOMP_DATA = 52, H_OFF_COMP = 56, H_BLOCKS_CCC = 60, H_BLOCKS_QC = 62,
-    H_SIZE_CCC = 64, H_SIZE_QC = 68, H_NZ = 72, H_COMP_SIZE = 74,
-    H_NUM_CHUNKS = 76, H_NUM_PAIRS = 78, H_DECOMP_LEN = 80, H_DECOMP_PACKED = 84,
-    H_RLE_CCC_VAL = 88, H_RLE_CCC_CHK = 90, H_RLE_QC_VAL = 92, H_RLE_QC_CHK = 94,
-    SZ_U32 = 4, SZ_U16 = 2,
+    H_MAGIC = 0,
+    H_VERSION = 4,
+    H_OFF_S1_TOP = 8,
+    H_OFF_S1_CHUNKS = 12,
+    H_OFF_PAIR_CCC = 16,
+    H_OFF_PAIR_QC = 20,
+    H_OFF_S2_CCC_OFF = 24,
+    H_OFF_S2_CCC_VAL = 28,
+    H_OFF_S2_CCC_CHK = 32,
+    H_OFF_S2_QC_OFF = 36,
+    H_OFF_S2_QC_VAL = 40,
+    H_OFF_S2_QC_CHK = 44,
+    H_OFF_DECOMP_SPARSE = 48,
+    H_OFF_DECOMP_DATA = 52,
+    H_OFF_COMP = 56,
+    H_BLOCKS_CCC = 60,
+    H_BLOCKS_QC = 62,
+    H_SIZE_CCC = 64,
+    H_SIZE_QC = 68,
+    H_NZ = 72,
+    H_COMP_SIZE = 74,
+    H_NUM_CHUNKS = 76,
+    H_NUM_PAIRS = 78,
+    H_DECOMP_LEN = 80,
+    H_DECOMP_PACKED = 84,
+    H_RLE_CCC_VAL = 88,
+    H_RLE_CCC_CHK = 90,
+    H_RLE_QC_VAL = 92,
+    H_RLE_QC_CHK = 94,
+    SZ_U32 = 4,
+    SZ_U16 = 2,
   };
   {
     uint8_t h[NFC_HEADER_SIZE];
@@ -254,20 +276,34 @@ int main(int argc, char* argv[]) {
     memcpy(h + H_OFF_DECOMP_DATA, &off_decomp_data, SZ_U32);
     memcpy(h + H_OFF_COMP, &off_comp, SZ_U32);
     uint16_t u16;
-    u16 = (uint16_t)d->stage2_blocks_ccc; memcpy(h + H_BLOCKS_CCC, &u16, SZ_U16);
-    u16 = (uint16_t)d->stage2_blocks_qc; memcpy(h + H_BLOCKS_QC, &u16, SZ_U16);
-    uint32_t u32 = (uint32_t)size_ccc; memcpy(h + H_SIZE_CCC, &u32, SZ_U32);
-    u32 = (uint32_t)size_qc; memcpy(h + H_SIZE_QC, &u32, SZ_U32);
-    u16 = (uint16_t)(nz > U16_MAX ? U16_MAX : (uint32_t)nz); memcpy(h + H_NZ, &u16, SZ_U16);
-    u16 = (uint16_t)d->comp_size; memcpy(h + H_COMP_SIZE, &u16, SZ_U16);
-    u16 = d->stage1_num_chunks; memcpy(h + H_NUM_CHUNKS, &u16, SZ_U16);
-    u16 = (uint16_t)d->stage1_num_pairs; memcpy(h + H_NUM_PAIRS, &u16, SZ_U16);
-    u32 = (uint32_t)d->decomp_data_len; memcpy(h + H_DECOMP_LEN, &u32, SZ_U32);
-    u32 = (uint32_t)decomp_packed; memcpy(h + H_DECOMP_PACKED, &u32, SZ_U32);
-    u16 = (uint16_t)(ccc_val_rle > U16_MAX ? U16_MAX : (uint32_t)ccc_val_rle); memcpy(h + H_RLE_CCC_VAL, &u16, SZ_U16);
-    u16 = (uint16_t)(ccc_chk_rle > U16_MAX ? U16_MAX : (uint32_t)ccc_chk_rle); memcpy(h + H_RLE_CCC_CHK, &u16, SZ_U16);
-    u16 = (uint16_t)(qc_val_rle > U16_MAX ? U16_MAX : (uint32_t)qc_val_rle); memcpy(h + H_RLE_QC_VAL, &u16, SZ_U16);
-    u16 = (uint16_t)(qc_chk_rle > U16_MAX ? U16_MAX : (uint32_t)qc_chk_rle); memcpy(h + H_RLE_QC_CHK, &u16, SZ_U16);
+    u16 = (uint16_t)d->stage2_blocks_ccc;
+    memcpy(h + H_BLOCKS_CCC, &u16, SZ_U16);
+    u16 = (uint16_t)d->stage2_blocks_qc;
+    memcpy(h + H_BLOCKS_QC, &u16, SZ_U16);
+    uint32_t u32 = (uint32_t)size_ccc;
+    memcpy(h + H_SIZE_CCC, &u32, SZ_U32);
+    u32 = (uint32_t)size_qc;
+    memcpy(h + H_SIZE_QC, &u32, SZ_U32);
+    u16 = (uint16_t)(nz > U16_MAX ? U16_MAX : (uint32_t)nz);
+    memcpy(h + H_NZ, &u16, SZ_U16);
+    u16 = (uint16_t)d->comp_size;
+    memcpy(h + H_COMP_SIZE, &u16, SZ_U16);
+    u16 = d->stage1_num_chunks;
+    memcpy(h + H_NUM_CHUNKS, &u16, SZ_U16);
+    u16 = (uint16_t)d->stage1_num_pairs;
+    memcpy(h + H_NUM_PAIRS, &u16, SZ_U16);
+    u32 = (uint32_t)d->decomp_data_len;
+    memcpy(h + H_DECOMP_LEN, &u32, SZ_U32);
+    u32 = (uint32_t)decomp_packed;
+    memcpy(h + H_DECOMP_PACKED, &u32, SZ_U32);
+    u16 = (uint16_t)(ccc_val_rle > U16_MAX ? U16_MAX : (uint32_t)ccc_val_rle);
+    memcpy(h + H_RLE_CCC_VAL, &u16, SZ_U16);
+    u16 = (uint16_t)(ccc_chk_rle > U16_MAX ? U16_MAX : (uint32_t)ccc_chk_rle);
+    memcpy(h + H_RLE_CCC_CHK, &u16, SZ_U16);
+    u16 = (uint16_t)(qc_val_rle > U16_MAX ? U16_MAX : (uint32_t)qc_val_rle);
+    memcpy(h + H_RLE_QC_VAL, &u16, SZ_U16);
+    u16 = (uint16_t)(qc_chk_rle > U16_MAX ? U16_MAX : (uint32_t)qc_chk_rle);
+    memcpy(h + H_RLE_QC_CHK, &u16, SZ_U16);
     fwrite(h, 1, NFC_HEADER_SIZE, f);
   }
   fwrite(d->stage1_top, 1, top_size, f);
@@ -344,12 +380,12 @@ int main(int argc, char* argv[]) {
   }
 
   /* Pack decomp_data: 1 byte length + DECOMP_CP_BYTES per code point per record (skip idx 0) */
-  for (size_t i = 1; i < d->decomp_data_len; ) {
+  for (size_t i = 1; i < d->decomp_data_len;) {
     uint32_t len = d->decomp_data[i];
     fputc((int)(len & 0xFF), f);
     for (uint32_t j = 0; j < len; ++j) {
       uint32_t cp = d->decomp_data[i + DECOMP_LEN_BYTES + j];
-      uint8_t b[DECOMP_CP_BYTES] = { (uint8_t)(cp), (uint8_t)(cp >> 8), (uint8_t)(cp >> 16) };
+      uint8_t b[DECOMP_CP_BYTES] = {(uint8_t)(cp), (uint8_t)(cp >> 8), (uint8_t)(cp >> 16)};
       fwrite(b, 1, DECOMP_CP_BYTES, f);
     }
     i += DECOMP_LEN_BYTES + (size_t)len;
@@ -361,9 +397,8 @@ int main(int argc, char* argv[]) {
 
   /* Pack comp table: 3×COMP_CP_BITS code points per entry */
   for (size_t i = 0; i < d->comp_size; ++i) {
-    uint64_t packed = (uint64_t)d->comp_table[i].starter
-        | ((uint64_t)d->comp_table[i].combining << NFC_COMP_CP_BITS)
-        | ((uint64_t)d->comp_table[i].composed << (2 * NFC_COMP_CP_BITS));
+    uint64_t packed = (uint64_t)d->comp_table[i].starter | ((uint64_t)d->comp_table[i].combining << NFC_COMP_CP_BITS) |
+                      ((uint64_t)d->comp_table[i].composed << (2 * NFC_COMP_CP_BITS));
     uint8_t buf[NFC_COMP_ENTRY_BYTES];
     buf[0] = (uint8_t)(packed);
     buf[1] = (uint8_t)(packed >> 8);

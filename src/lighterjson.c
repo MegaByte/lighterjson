@@ -3,7 +3,7 @@
  * @brief     JSON minifier
  * @author    Aaron Kaluszka
  * @version   2.0.0
- * @date      11 Apr 2026
+ * @date      16 Apr 2026
  * @copyright Copyright 2017-2026 Aaron Kaluszka
  *            Licensed under the Apache License, Version 2.0 (the "License");
  *            you may not use this file except in compliance with the License.
@@ -262,10 +262,12 @@ static void do_object(LighterData* data, Context* ctx, int line_start) {
   }
 }
 
-/** Parse values from the current position with structural tracking and garbage recovery. */
-static int do_value(LighterData* data, Context* ctx, int line_start) {
-  Bitfield parent_types;
-  init_bits(&parent_types);
+/** Parse values from the current position with structural tracking and garbage
+ * recovery. The caller owns parent_types (must call init_bits before, free heap
+ * storage after). On return, parent_types holds the open-container stack at EOF
+ * and *out_comma_ok indicates whether the parser was expecting a separator (1)
+ * or a value (0). */
+static void do_value(LighterData* data, Context* ctx, int line_start, Bitfield* parent_types, int* out_comma_ok) {
   int comma_ok = 0;
   while (data->rindex < data->data_end) {
     switch (*data->rindex) {
@@ -275,14 +277,14 @@ static int do_value(LighterData* data, Context* ctx, int line_start) {
         break;
       case '{':
         ++(data->rindex);
-        push_set_bit(&parent_types);
+        push_set_bit(parent_types);
         do_object(data, ctx, line_start);
         comma_ok = 0;
         break;
       case '}':
-        if (parent_types.current == Object) {
+        if (parent_types->current == Object) {
           ++(data->rindex);
-          pop_bit(&parent_types);
+          pop_bit(parent_types);
           comma_ok = 1;
         } else {
           lighter_write_data(data, 1);
@@ -290,22 +292,23 @@ static int do_value(LighterData* data, Context* ctx, int line_start) {
         break;
       case '[':
         ++(data->rindex);
-        push_clear_bit(&parent_types);
+        push_clear_bit(parent_types);
         comma_ok = 0;
         break;
       case ']':
-        if (parent_types.current == Array) {
+        if (parent_types->current == Array) {
           ++(data->rindex);
-          pop_bit(&parent_types);
+          pop_bit(parent_types);
           comma_ok = 1;
         } else {
           lighter_write_data(data, 1);
         }
         break;
       case ',':
-        if (comma_ok && parent_types.current != None) {
+        if (comma_ok && parent_types->current != None) {
           ++(data->rindex);
-          if (parent_types.current == Object) {
+          comma_ok = 0;
+          if (parent_types->current == Object) {
             do_object(data, ctx, line_start);
           }
         } else {
@@ -339,15 +342,17 @@ static int do_value(LighterData* data, Context* ctx, int line_start) {
         comma_ok = 1;
         break;
       case '\n':
-        switch (line_start) {
-          case 1:
-            --line_start;
-            /* fall through */
-          case 2:
-            ++(data->rindex);
-            break;
-          default:
-            skip_whitespace_run(data, 1, ctx);
+        /* NDJSON record separator handling. -N preserves every '\n' (blank lines
+         * round-trip, including leading); -n preserves one '\n' once a record has
+         * been emitted, collapsing runs. Inside a value or in compact mode the
+         * newline is dropped along with surrounding whitespace. */
+        if (parent_types->current == None && ctx->newlines == 2) {
+          ++(data->rindex);
+        } else if (parent_types->current == None && ctx->newlines == 1 && data->windex > data->data_start) {
+          ++(data->rindex);
+          skip_whitespace_run(data, 1, ctx);
+        } else {
+          skip_whitespace_run(data, 1, ctx);
         }
         break;
       case ' ':
@@ -364,10 +369,35 @@ static int do_value(LighterData* data, Context* ctx, int line_start) {
         data->lindex = data->rindex;
     }
   }
-  if (parent_types.bits != &parent_types.initial_bits) {
-    free(parent_types.bits);
+  /* EOF reached. Flush any pending segment (e.g. trailing whitespace) so the
+   * caller can decide whether to write closures past the original input. */
+  lighter_write_data(data, 0);
+  *out_comma_ok = comma_ok;
+}
+
+/** Append synthetic close braces / null-padding for truncated input. The caller
+ * must ensure data->buffer_end has room for the worst case: 1 byte for an
+ * unterminated string's closing quote, 4 bytes for an optional dangling ':' ->
+ * ":null" expansion, and one byte per open container. */
+static void finalize_closures(LighterData* data, Bitfield* parent_types, int comma_ok) {
+  if (data->needs_quote && data->windex < data->buffer_end) {
+    *data->windex++ = '"';
+    data->needs_quote = 0;
   }
-  return 0;
+  if (parent_types->current != (size_t)-1 && comma_ok == 0 && data->windex > data->data_start) {
+    /* If we ended on a dangling ':' inside an object, the key has no value yet.
+     * Replace ':' with ":null" so the result is valid JSON instead of {"k"}. */
+    if (data->windex[-1] == ':' && data->windex + 4 <= data->buffer_end) {
+      memcpy(data->windex, "null", 4);
+      data->windex += 4;
+    } else if (data->windex[-1] == ',') {
+      --data->windex;
+    }
+  }
+  while (parent_types->current != (size_t)-1 && data->windex < data->buffer_end) {
+    *data->windex++ = (parent_types->current == Object) ? '}' : ']';
+    pop_bit(parent_types);
+  }
 }
 
 /** Return non-zero when name should be processed for the current mode. */
@@ -433,17 +463,54 @@ static int do_file(Context* ctx, char filename[]) {
   data.data_start = map.data;
   data.windex = map.data;
   data.data_end = map.data + map.size;
+  data.buffer_end = map.data + map_capacity;
   data.rindex = map.data + bom_size;
   data.lindex = data.rindex;
+  data.needs_quote = 0;
 
   int exit_code = EXIT_SUCCESS;
-  do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0); /* clean up leading newlines in -N mode */
+  Bitfield parent_types;
+  init_bits(&parent_types);
+  int comma_ok;
+  do_value(&data, ctx, ctx->newlines == 2 ? 2 : 0, &parent_types, &comma_ok); /* clean up leading newlines in -N mode */
   if (ctx->newlines) {
     while (data.rindex < data.data_end) {
-      do_value(&data, ctx, ctx->newlines);
+      do_value(&data, ctx, ctx->newlines, &parent_types, &comma_ok);
     }
   }
   lighter_write_data(&data, 0);
+
+  if (parent_types.current != (size_t)-1 || data.needs_quote) {
+    /* Compute exactly what finalize_closures will append: 1 byte for an unterminated
+     * string '"', 4 extra bytes if a dangling ':' must expand to ":null" (only when
+     * inside a container with no value yet), and one '}'/']' per open container.
+     * Stack depth follows directly from bit position; no bitfield walk needed. */
+    int dangling_colon = !data.needs_quote && parent_types.current != (size_t)-1 && comma_ok == 0 && data.windex > data.data_start && data.windex[-1] == ':';
+    size_t need_bytes = parent_types.bit_level + parent_types.byte_level * sizeof(uint64_t) * CHAR_BIT + (data.needs_quote ? 1u : 0u) + (dangling_colon ? 4u : 0u);
+    if ((size_t)(data.buffer_end - data.windex) < need_bytes) {
+      uint8_t* old_data_h = NULL;
+      size_t old_size_h = 0;
+      size_t new_size = (size_t)(data.windex - data.data_start) + need_bytes;
+      if (lighter_map_expand(&map, new_size, &old_data_h, &old_size_h) == 0) {
+        if (old_data_h) {
+          lighter_map_unmap(old_data_h, old_size_h);
+        }
+        /* The mapping may have moved on Unix; rebase pointers by the relocation delta. */
+        ptrdiff_t shift = map.data - data.data_start;
+        data.data_start += shift;
+        data.windex += shift;
+        data.lindex += shift;
+        data.rindex += shift;
+        data.data_end = map.data + new_size;
+        data.buffer_end = map.data + new_size;
+        map_capacity = new_size;
+      }
+    }
+    finalize_closures(&data, &parent_types, comma_ok);
+  }
+  if (parent_types.bits != &parent_types.initial_bits) {
+    free(parent_types.bits);
+  }
   if (ctx->newlines == 1 && data.windex > data.data_start && *(data.windex - 1) == '\n') {
     --(data.windex); /* clean up trailing newline in -n mode */
   }
@@ -466,7 +533,9 @@ static int do_file(Context* ctx, char filename[]) {
     fprintf(stderr, "Could not sync file\n");
     exit_code = EXIT_FAILURE;
   }
-  if (exit_code == EXIT_SUCCESS && written > 0 && lighter_map_truncate(&map, written) != 0) {
+  /* Always truncate (even to 0) so that any reserved closure headroom doesn't
+   * leak into the output as null/garbage bytes. */
+  if (exit_code == EXIT_SUCCESS && lighter_map_truncate(&map, written) != 0) {
     fprintf(stderr, "Could not truncate file. It may have garbage at the end\n");
   }
 

@@ -28,7 +28,5 @@ If passed a directory, all .json files contained within will be processed recurs
 
 Numbers can be rounded to specific decimal places using the -p switch. Use negative numbers to represent places greater than ones.
 
-Not all cases of ill-formed files are currently handled. Make sure to backup before running.
-
 ## Author
 Aaron Kaluszka <<megabyte@kontek.net>>

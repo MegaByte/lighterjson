@@ -215,8 +215,75 @@ if command -v python3 >/dev/null 2>&1; then
   encoding_roundtrip "utf-8-sig" "efbbbf" || true
 fi
 
-# NDJSON (multiple values) - skipped: in-place minify corrupts when lines shrink
-# run_test "ndjson" "-n" "$TESTDATA/ndjson.json" || true
+# NDJSON: validate per-record after splitting on '\n'.
+ndjson_check() {
+  name="$1"
+  opts="$2"
+  src="$3"
+  expected_records="$4"
+  expected_blank_lines="$5"
+  cp "$src" "$OUT_DIR/${name}.json"
+  if ! "$LIGHTER" -q $opts "$OUT_DIR/${name}.json" 2>/dev/null; then
+    echo "  FAIL $name (minify failed)"
+    FAIL=$((FAIL + 1))
+    return 1
+  fi
+  if ! python3 - "$OUT_DIR/${name}.json" "$src" "$expected_records" "$expected_blank_lines" << 'PYEOF'
+import json, sys
+out_path, src_path, exp_records, exp_blank = sys.argv[1:5]
+exp_records = int(exp_records)
+exp_blank = int(exp_blank)
+with open(out_path) as f:
+    text = f.read()
+with open(src_path) as f:
+    orig_text = f.read()
+# Split on '\n'; expected_records non-empty lines, expected_blank empty lines.
+lines = text.split("\n")
+# A trailing newline produces a final empty entry that is not a separate line.
+if lines and lines[-1] == "":
+    lines = lines[:-1]
+records = [l for l in lines if l]
+blanks = [l for l in lines if not l]
+if len(records) != exp_records:
+    print(f"record count {len(records)} != {exp_records}", file=sys.stderr)
+    sys.exit(1)
+if len(blanks) != exp_blank:
+    print(f"blank-line count {len(blanks)} != {exp_blank}", file=sys.stderr)
+    sys.exit(1)
+# Each non-blank line must parse as JSON and equal the corresponding source record.
+orig_lines = [l for l in orig_text.split("\n") if l.strip()]
+def norm(x):
+    if isinstance(x, dict): return {k:norm(v) for k,v in x.items()}
+    if isinstance(x, list): return [norm(v) for v in x]
+    if isinstance(x, (int,float)): return float(x)
+    return x
+if len(orig_lines) != len(records):
+    sys.exit(1)
+for o, g in zip(orig_lines, records):
+    if norm(json.loads(o)) != norm(json.loads(g)):
+        sys.exit(1)
+sys.exit(0)
+PYEOF
+  then
+    echo "  FAIL $name (NDJSON content mismatch)"
+    FAIL=$((FAIL + 1))
+    return 1
+  fi
+  echo "  PASS $name"
+  PASS=$((PASS + 1))
+}
+
+if command -v python3 >/dev/null 2>&1; then
+  ndjson_check "ndjson-n" "-n" "$TESTDATA/ndjson.json" 3 0 || true
+  ndjson_check "ndjson-N" "-N" "$TESTDATA/ndjson.json" 3 0 || true
+  # Blank-line preservation: -N keeps them, -n collapses them.
+  printf '{"a":1}\n\n{"b":2}\n\n\n{"c":3}\n' > "$OUT_DIR/ndjson_blanks.in"
+  ndjson_check "ndjson-n-blanks-collapsed" "-n" "$OUT_DIR/ndjson_blanks.in" 3 0 || true
+  ndjson_check "ndjson-N-blanks-preserved" "-N" "$OUT_DIR/ndjson_blanks.in" 3 3 || true
+  # Whitespace inside records gets stripped, separators preserved.
+  printf '{ "a" : 1 }\n{ "b" : 2 }\n' > "$OUT_DIR/ndjson_ws.in"
+  ndjson_check "ndjson-n-strip-inner-ws" "-n" "$OUT_DIR/ndjson_ws.in" 2 0 || true
+fi
 
 # Idempotency: minify twice, output should parse and size unchanged
 cp "$TESTDATA/empty_object.json" "$OUT_DIR/idem.json"

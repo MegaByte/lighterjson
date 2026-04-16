@@ -20,6 +20,11 @@ typedef struct LighterData {
   uint8_t* windex;
   uint8_t* lindex;
   uint8_t* data_end;
+  uint8_t* buffer_end; /* end of writable buffer; >= data_end. Used for
+                        * synthetic closures (closing braces/quotes appended at
+                        * EOF for truncated input). */
+  int needs_quote;     /* set when an unterminated string couldn't fit a synthetic
+                          '"' */
 } LighterData;
 
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */

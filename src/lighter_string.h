@@ -294,6 +294,29 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
   return 0;
 }
 
+/** Close a truncated string at EOF: flush the partial content and append '"'.
+ * Called only when the input was truncated mid-string; not on the hot path. */
+static inline void lighter_string_close_at_eof(LighterData* data) {
+  /* lindex points at the opening '"' (or escape boundary); rindex == data_end.
+   * Flush the partial bytes, then write a synthetic closing quote so output is
+   * still valid JSON. If the buffer is full, signal upward so the caller can
+   * expand the mapping and retry. */
+  lighter_write_data(data, 0);
+  if (data->windex < data->buffer_end) {
+    *data->windex++ = '"';
+  } else {
+    data->needs_quote = 1;
+  }
+}
+
+/** Common return wrapper: if rindex hit EOF without a closing quote, synthesize
+ * one. */
+static inline void lighter_string_finish(LighterData* data) {
+  if (data->rindex >= data->data_end) {
+    lighter_string_close_at_eof(data);
+  }
+}
+
 /** Parse the JSON string at rindex and optionally NFC-normalize its content. */
 static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv) {
   ++(data->rindex);
@@ -304,9 +327,11 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
     while (data->rindex < data->data_end) {
       lighter_simd_avx2_string_skip(data, &saw_non_ascii);
       if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+        lighter_string_finish(data);
         return;
       }
     }
+    lighter_string_close_at_eof(data);
     return;
   }
 #endif
@@ -322,9 +347,11 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);
       if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+        lighter_string_finish(data);
         return;
       }
     }
+    lighter_string_close_at_eof(data);
     return;
   }
 #endif
@@ -368,9 +395,11 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
       ++data->rindex;
     }
     if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+      lighter_string_finish(data);
       return;
     }
   }
+  lighter_string_close_at_eof(data);
 }
 
 #endif /* LIGHTER_STRING_H */

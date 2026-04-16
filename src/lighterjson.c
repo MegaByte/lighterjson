@@ -67,8 +67,39 @@ typedef struct PathBuffer {
 #define LIGHTER_BOUNDARY_BASE 0x09u
 #define LIGHTER_BOUNDARY_MASK_BITS 64u
 
+#if LIGHTER_PLATFORM_X86
+/** Advance run past a contiguous whitespace span with AVX2. */
+LIGHTER_TARGET_AVX2
+static uint8_t* skip_whitespace_avx2(uint8_t* run, uint8_t* end, int include_newline) {
+  __m256i spaces = _mm256_set1_epi8(' ');
+  __m256i tabs = _mm256_set1_epi8('\t');
+  __m256i crs = _mm256_set1_epi8('\r');
+  __m256i lfs = _mm256_set1_epi8('\n');
+  while (run + 32 <= end) {
+    __m256i chunk = _mm256_loadu_si256((const __m256i*)run);
+    __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, spaces), _mm256_or_si256(_mm256_cmpeq_epi8(chunk, tabs), _mm256_cmpeq_epi8(chunk, crs)));
+    if (include_newline) {
+      m = _mm256_or_si256(m, _mm256_cmpeq_epi8(chunk, lfs));
+    }
+    uint32_t mask = (uint32_t)_mm256_movemask_epi8(m);
+    if (mask != 0xFFFFFFFF) {
+  #if defined(_MSC_VER)
+      unsigned long offset;
+      _BitScanForward(&offset, ~mask);
+      return run + offset;
+  #else
+      return run + __builtin_ctz(~mask);
+  #endif
+    }
+    run += 32;
+  }
+  return run;
+}
+#endif /* LIGHTER_PLATFORM_X86 */
+
 /** Advance run past a contiguous whitespace span, using SIMD when worthwhile. */
-static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_neon, int has_rvv) {
+static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int include_newline, int has_avx2, int has_neon, int has_rvv) {
+  (void)has_avx2;
   (void)has_neon;
   (void)has_rvv;
   /* Use a short scalar prefix before the SIMD scan so brief whitespace runs are
@@ -89,7 +120,11 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
   if (run >= end) {
     return run;
   }
-#if LIGHTER_PLATFORM_ARM64
+#if LIGHTER_PLATFORM_X86
+  if (has_avx2) {
+    run = skip_whitespace_avx2(run, end, include_newline);
+  }
+#elif LIGHTER_PLATFORM_ARM64
   if (has_neon) {
     uint8x16_t spaces = vdupq_n_u8(' ');
     uint8x16_t tabs = vdupq_n_u8('\t');
@@ -146,7 +181,7 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
 
 /** Skip the whitespace run at rindex and flush any preceding output. */
 void skip_whitespace_run(LighterData* data, int include_newline, Context* ctx) {
-  uint8_t* run = skip_whitespace_impl(data->rindex, data->data_end, include_newline, ctx->has_neon, ctx->has_rvv);
+  uint8_t* run = skip_whitespace_impl(data->rindex, data->data_end, include_newline, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
   lighter_write_data(data, run - data->rindex);
 }
 

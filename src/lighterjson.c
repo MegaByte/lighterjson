@@ -486,7 +486,8 @@ static int do_file(Context* ctx, char filename[]) {
      * inside a container with no value yet), and one '}'/']' per open container.
      * Stack depth follows directly from bit position; no bitfield walk needed. */
     int dangling_colon = !data.needs_quote && parent_types.current != (size_t)-1 && comma_ok == 0 && data.windex > data.data_start && data.windex[-1] == ':';
-    size_t need_bytes = parent_types.bit_level + parent_types.byte_level * sizeof(uint64_t) * CHAR_BIT + (data.needs_quote ? 1u : 0u) + (dangling_colon ? 4u : 0u);
+    size_t need_bytes =
+        parent_types.bit_level + parent_types.byte_level * sizeof(uint64_t) * CHAR_BIT + (data.needs_quote ? 1u : 0u) + (dangling_colon ? 4u : 0u);
     if ((size_t)(data.buffer_end - data.windex) < need_bytes) {
       uint8_t* old_data_h = NULL;
       size_t old_size_h = 0;
@@ -692,7 +693,7 @@ void usage(char progname[], int status) {
           "  -p N Numeric precision (number of decimal places; can be negative)\n"
           "  -n   Process NDJSON/JSON Lines\n"
           "  -N   Process NDJSON, preserving empty lines\n"
-          "  -a   Use asynchronous memory mapped I/O\n"
+          "  -s   Block until writes are flushed to disk (default: async)\n"
           "  -U   Disable Unicode normalization\n"
           "  -q   Suppress output\n",
           progname);
@@ -708,7 +709,7 @@ int main(int argc, char* argv[]) {
       .quiet = 0,
       .newlines = 0,
       .disable_nfc = 0,
-      .async_io = 0,
+      .async_io = 1,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
       .has_avx2 = lighter_cpu_supports_avx2(),
       .has_neon = lighter_cpu_supports_neon(),
@@ -744,8 +745,8 @@ int main(int argc, char* argv[]) {
         case 'U':
           ctx.disable_nfc = 1;
           break;
-        case 'a':
-          ctx.async_io = 1;
+        case 's':
+          ctx.async_io = 0;
           break;
         case 'p': {
           if (o[1]) {

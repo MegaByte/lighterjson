@@ -160,11 +160,20 @@ static inline int lighter_map_open(LighterMap* m, const char* path, int read_onl
 #endif
 }
 
-/** Flush len bytes of the current mapping to disk. */
+/** Flush len bytes of the current mapping to disk. When async_io is set, returns
+ * after handing dirty pages to the OS (writeback happens later); otherwise blocks
+ * until the bytes are physically committed. */
 static inline int lighter_map_sync(LighterMap* m, size_t len, int async_io) {
 #if LIGHTER_MEMMAP_WIN
-  (void)async_io;
-  return FlushViewOfFile(m->data, len) ? 0 : -1;
+  if (!FlushViewOfFile(m->data, len)) {
+    return -1;
+  }
+  /* FlushViewOfFile only pushes pages into the filesystem cache. Force a physical
+   * write by also calling FlushFileBuffers when the caller asked for sync I/O. */
+  if (!async_io && m->h_file != INVALID_HANDLE_VALUE && !FlushFileBuffers(m->h_file)) {
+    return -1;
+  }
+  return 0;
 #else
   return msync(m->data, len, async_io ? MS_ASYNC : MS_SYNC);
 #endif

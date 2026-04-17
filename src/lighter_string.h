@@ -343,7 +343,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
 #endif
 
 #if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-  if (has_rvv) {
+  if (has_rvv && LIGHTER_RVV_SITE_ENABLED("string")) {
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);
       if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {

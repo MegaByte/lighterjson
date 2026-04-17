@@ -966,7 +966,7 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
   } else
 #endif
 #if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-      if (has_rvv) {
+      if (has_rvv && LIGHTER_RVV_SITE_ENABLED("nfc")) {
     p = nfc_scan_high_rvv(p, end, &found_high);
   } else
 #endif

@@ -481,7 +481,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
       }
     }
 #elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-    if (has_rvv && i < data->data_end) {
+    if (has_rvv && LIGHTER_RVV_SITE_ENABLED("significand") && i < data->data_end) {
       size_t chunk_vl;
       intptr_t action = lighter_significand_chunk_rvv(i, data->data_end, &non_zero_start, &non_zero_finish, &chunk_vl);
       if (action >= 0) {
@@ -580,7 +580,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
         }
       }
 #elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-      if (has_rvv && i < data->data_end) {
+      if (has_rvv && LIGHTER_RVV_SITE_ENABLED("exponent") && i < data->data_end) {
         size_t chunk_vl;
         intptr_t invalid = lighter_exponent_chunk_rvv(i, data->data_end, &chunk_vl);
         if (invalid >= 0) {

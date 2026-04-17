@@ -36,6 +36,22 @@ test-json: lighterjson lighter.nfc
 
 test-all: test test-json
 
+# Cross-platform correctness test via QEMU under Docker. Slow (apt + emulation)
+# but catches RVV intrinsic regressions without RISC-V hardware.
+test-riscv:
+	docker run --rm -v "$(CURDIR)":/src -e QEMU_CPU=rv64,v=true,vlen=128,vext_spec=v1.0 \
+	  --platform linux/riscv64 riscv64/ubuntu:25.04 bash -c \
+	  'apt-get update >/dev/null && apt-get install -y -qq gcc make python3 curl >/dev/null && \
+	   cd /src && make clean && make test-json'
+
+# Same as test-riscv but with V disabled in the QEMU CPU model, to verify the
+# binary still runs correctly on non-V hardware (no SIGILL from RVV ops).
+test-riscv-novec:
+	docker run --rm -v "$(CURDIR)":/src --platform linux/riscv64 \
+	  riscv64/ubuntu:25.04 bash -c \
+	  'apt-get update >/dev/null && apt-get install -y -qq gcc make python3 curl >/dev/null && \
+	   cd /src && make clean && make test-json'
+
 lighter.nfc: tools/gen_unicode_tables ucd
 	./tools/gen_unicode_tables ucd > lighter.nfc
 
@@ -43,4 +59,4 @@ clean:
 	rm -f lighterjson lighter.nfc tools/gen_unicode_tables test_nfc
 	rm -rf ucd testdata/.out
 
-.PHONY: all clean test test-json test-all ucd
+.PHONY: all clean test test-json test-all test-riscv test-riscv-novec ucd

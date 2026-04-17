@@ -114,6 +114,46 @@ struct lighter_riscv_hwprobe {
   uint64_t value;
 };
 
+  #include <stdlib.h>
+  #include <string.h>
+
+/* Per-RVV-site toggles for benchmarking. The comparison and env parsing happen
+ * exactly once per site via a function-local static guarded by a parsed-once
+ * flag; subsequent calls fold into a single cached-int load. Names in the
+ * LIGHTERJSON_RVV_DISABLE env var (comma-separated) disable the matching
+ * site(s); "all" disables every site; unset or empty keeps them enabled.
+ *
+ * The intended usage is LIGHTER_RVV_SITE_ENABLED("whitespace") etc. — each
+ * call site gets its own cache slot and the string comparison happens only
+ * on the first call through that site, not in the hot path. */
+static inline int lighter_rvv_parse_site(const char* name) {
+  const char* env = getenv("LIGHTERJSON_RVV_DISABLE");
+  if (!env || !*env) {
+    return 1;
+  }
+  size_t name_len = strlen(name);
+  const char* p = env;
+  while (*p) {
+    const char* comma = strchr(p, ',');
+    size_t span = comma ? (size_t)(comma - p) : strlen(p);
+    if ((span == 3 && memcmp(p, "all", 3) == 0) || (span == name_len && memcmp(p, name, name_len) == 0)) {
+      return 0;
+    }
+    p += span + (comma ? 1 : 0);
+  }
+  return 1;
+}
+
+/* Hot-path gate: a static int per call site, initialized on first call. */
+  #define LIGHTER_RVV_SITE_ENABLED(name_literal)              \
+    ({                                                        \
+      static int _lighter_rvv_site_cache = -1;                \
+      if (_lighter_rvv_site_cache < 0) {                      \
+        _lighter_rvv_site_cache = lighter_rvv_parse_site(name_literal); \
+      }                                                       \
+      _lighter_rvv_site_cache;                                \
+    })
+
 /** Return non-zero when RVV is available on the current RISC-V CPU. */
 static inline int lighter_cpu_supports_rvv(void) {
   #if defined(__linux__) && defined(__NR_riscv_hwprobe) && !defined(LIGHTER_NO_RVV_INTRINSICS)
@@ -131,6 +171,8 @@ static inline int lighter_cpu_supports_rvv(void) {
 static inline int lighter_cpu_supports_rvv(void) {
   return 0;
 }
+/** Stub: per-site toggle is a no-op when RVV isn't available. */
+  #define LIGHTER_RVV_SITE_ENABLED(name_literal) 1
 #endif
 
 #endif /* LIGHTER_CPU_H */

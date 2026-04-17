@@ -171,7 +171,7 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
     }
   }
 #elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-  if (has_rvv) {
+  if (has_rvv && LIGHTER_RVV_SITE_ENABLED("whitespace")) {
     run = skip_whitespace_rvv(run, end, include_newline);
   }
 #endif

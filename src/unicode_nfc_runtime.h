@@ -923,27 +923,8 @@ static const uint8_t* nfc_scan_high_avx2(const uint8_t* p, const uint8_t* end, i
 }
 #endif /* LIGHTER_PLATFORM_X86 */
 
-#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-/** Scan ASCII-only span with RVV; return updated pointer and set *found_high. */
-LIGHTER_TARGET_RVV
-static const uint8_t* nfc_scan_high_rvv(const uint8_t* p, const uint8_t* end, int* found_high) {
-  while (p < end) {
-    size_t n = end - p;
-    size_t vl = __riscv_vsetvl_e8m1(n);
-    vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-    vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
-    if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
-      *found_high = 1;
-      break;
-    }
-    p += vl;
-  }
-  return p;
-}
-#endif
-
 /** Return the NFC quick-check result for the UTF-8 span [start, end). */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx2, int has_neon, int has_rvv) {
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx2, int has_neon) {
   const uint8_t* p = start;
   int found_high = 0;
 
@@ -963,11 +944,6 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       }
       p += 16;
     }
-  } else
-#endif
-#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-      if (has_rvv) {
-    p = nfc_scan_high_rvv(p, end, &found_high);
   } else
 #endif
   {

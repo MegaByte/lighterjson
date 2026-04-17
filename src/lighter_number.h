@@ -179,17 +179,6 @@ static intptr_t lighter_significand_chunk_rvv(uint8_t* i, uint8_t* end, uint8_t*
   return action;
 }
 
-/** RVV chunk scan inside the exponent loop: returns offset of first non-digit
- * (or -1 if all digits in this chunk), and writes the chunk vl to *chunk_vl_out. */
-LIGHTER_TARGET_RVV
-static intptr_t lighter_exponent_chunk_rvv(uint8_t* i, uint8_t* end, size_t* chunk_vl_out) {
-  size_t n = (size_t)(end - i);
-  size_t vl = __riscv_vsetvl_e8m1(n);
-  *chunk_vl_out = vl;
-  vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
-  vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
-  return __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m_digit, vl), vl);
-}
 #endif
 
 /** Write an exponent string adjusted by a small delta. Performs string-based addition/subtraction. */
@@ -579,25 +568,6 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
           continue;
         }
       }
-#elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-      if (has_rvv && i < data->data_end) {
-        size_t chunk_vl;
-        intptr_t invalid = lighter_exponent_chunk_rvv(i, data->data_end, &chunk_vl);
-        if (invalid >= 0) {
-          if (!exponent_start && invalid > 0) {
-            exponent_start = i;
-          }
-          i += invalid;
-          number_end = i - 1;
-          break;
-        } else {
-          if (!exponent_start) {
-            exponent_start = i;
-          }
-          i += chunk_vl;
-          continue;
-        }
-      }
 #endif
       switch (*i) {
         case '0':
@@ -648,8 +618,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
     }
     exponent_start = p;
     for (i = (uint8_t*)exponent_start; i <= number_end; ++i) {
-      if (exponent_value > LIGHTER_INT64_MAX_DIV10 ||
-          (exponent_value == LIGHTER_INT64_MAX_DIV10 && (*i - '0') > LIGHTER_INT64_MAX_LAST_DIGIT)) {
+      if (exponent_value > LIGHTER_INT64_MAX_DIV10 || (exponent_value == LIGHTER_INT64_MAX_DIV10 && (*i - '0') > LIGHTER_INT64_MAX_LAST_DIGIT)) {
         exponent_value = LIGHTER_INT64_MAX_VALUE;
         exponent_saturated = 1;
         break; /* further digits don't change the saturated value */

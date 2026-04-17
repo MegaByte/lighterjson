@@ -73,11 +73,31 @@ static inline int lighter_cpu_supports_neon(void) {
 #endif
 
 #if LIGHTER_PLATFORM_RISCV
-  #if defined(__has_include)
-    #if __has_include(<riscv_vector.h>)
-      #include <riscv_vector.h>
-    #endif
+  /* Make RVV intrinsics callable from individual functions without requiring the
+   * whole TU to be compiled with -march=...v. The pragma temporarily enables V
+   * so <riscv_vector.h> exposes its types/intrinsics; per-function attribute
+   * (LIGHTER_TARGET_RVV) restricts codegen of the actual vector ops to those
+   * functions, leaving the rest of the TU at the base ISA. */
+  #if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 14
+    #pragma GCC push_options
+    #pragma GCC target("arch=+v")
+    #include <riscv_vector.h>
+    #pragma GCC pop_options
+    #define LIGHTER_TARGET_RVV __attribute__((target("arch=+v")))
+  #elif defined(__clang__) && __has_attribute(target)
+    #pragma clang attribute push(__attribute__((target("v"))), apply_to = function)
+    #include <riscv_vector.h>
+    #pragma clang attribute pop
+    #define LIGHTER_TARGET_RVV __attribute__((target("v")))
+  #elif defined(__has_include) && __has_include(<riscv_vector.h>) && defined(__riscv_vector)
+    /* Older toolchains: only usable when the whole TU is built with -march=...v. */
+    #include <riscv_vector.h>
+    #define LIGHTER_TARGET_RVV
+  #else
+    #define LIGHTER_TARGET_RVV
+    #define LIGHTER_NO_RVV_INTRINSICS 1
   #endif
+
   #include <sys/syscall.h>
   #include <unistd.h>
 
@@ -96,7 +116,7 @@ struct lighter_riscv_hwprobe {
 
 /** Return non-zero when RVV is available on the current RISC-V CPU. */
 static inline int lighter_cpu_supports_rvv(void) {
-  #if defined(__linux__) && defined(__NR_riscv_hwprobe)
+  #if defined(__linux__) && defined(__NR_riscv_hwprobe) && !defined(LIGHTER_NO_RVV_INTRINSICS)
   struct lighter_riscv_hwprobe pair;
   pair.key = RISCV_HWPROBE_KEY_IMA_EXT_0;
   if (syscall(__NR_riscv_hwprobe, &pair, 1, 0, NULL, 0) == 0) {
@@ -106,6 +126,7 @@ static inline int lighter_cpu_supports_rvv(void) {
   return 0;
 }
 #else
+  #define LIGHTER_TARGET_RVV
 /** Return 0 when RISC-V runtime probing is unavailable on this build. */
 static inline int lighter_cpu_supports_rvv(void) {
   return 0;

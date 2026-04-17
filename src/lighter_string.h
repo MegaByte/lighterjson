@@ -233,12 +233,13 @@ static inline void lighter_simd_neon_string_skip(LighterData* data, int* saw_non
 }
 #endif
 
-#if LIGHTER_PLATFORM_RISCV
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
 /** Advance to the next quote or backslash with an RVV scan. */
-static inline void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_ascii) {
+LIGHTER_TARGET_RVV
+static void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_ascii) {
   while (data->rindex < data->data_end) {
     size_t n = data->data_end - data->rindex;
-    size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
+    size_t vl = __riscv_vsetvl_e8m1(n);
     vuint8m1_t chunk = __riscv_vle8_v_u8m1(data->rindex, vl);
     if (!*saw_non_ascii) {
       vbool8_t hi = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
@@ -342,7 +343,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   (void)lighter_simd_neon_string_skip; /* silence unused warning */
 #endif
 
-#if LIGHTER_PLATFORM_RISCV
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
   if (has_rvv) {
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);

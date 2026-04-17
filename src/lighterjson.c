@@ -64,6 +64,30 @@ typedef struct PathBuffer {
 #define LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR 2u
 #define LIGHTER_TRANSCODE_SLACK_BYTES 4u
 
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
+/** Advance run past a contiguous whitespace span with RVV. */
+LIGHTER_TARGET_RVV
+static uint8_t* skip_whitespace_rvv(uint8_t* run, uint8_t* end, int include_newline) {
+  while (run < end) {
+    size_t n = end - run;
+    size_t vl = __riscv_vsetvl_e8m1(n);
+    vuint8m1_t chunk = __riscv_vle8_v_u8m1(run, vl);
+    vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
+    m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
+    m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
+    if (include_newline) {
+      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
+    }
+    intptr_t index = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m, vl), vl);
+    if (index >= 0) {
+      return run + index;
+    }
+    run += vl;
+  }
+  return run;
+}
+#endif /* LIGHTER_PLATFORM_RISCV */
+
 #if LIGHTER_PLATFORM_X86
 /** Advance run past a contiguous whitespace span with AVX2. */
 LIGHTER_TARGET_AVX2
@@ -145,24 +169,9 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
       run += 16;
     }
   }
-#elif LIGHTER_PLATFORM_RISCV
+#elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
   if (has_rvv) {
-    while (run < end) {
-      size_t n = end - run;
-      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-      vuint8m1_t chunk = __riscv_vle8_v_u8m1(run, vl);
-      vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
-      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
-      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
-      if (include_newline) {
-        m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
-      }
-      intptr_t index = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m, vl), vl);
-      if (index >= 0) {
-        return run + index;
-      }
-      run += vl;
-    }
+    run = skip_whitespace_rvv(run, end, include_newline);
   }
 #endif
   /* Scalar tail (remainder after SIMD, or when SIMD isn't available) */

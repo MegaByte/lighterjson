@@ -139,10 +139,56 @@ static inline uint64_t lighter_simd_first_set_neon(uint64_t mask) {
 }
 #endif
 
-#if LIGHTER_PLATFORM_RISCV
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
 /** Returns a mask of bytes that are digits '0'-'9'. */
+LIGHTER_TARGET_RVV
 static inline vbool8_t lighter_simd_is_digit_rvv(vuint8m1_t chunk, size_t vl) {
   return __riscv_vmand_mm_b8(__riscv_vmsgeu_vx_u8m1_b8(chunk, '0', vl), __riscv_vmsleu_vx_u8m1_b8(chunk, '9', vl), vl);
+}
+
+/** RVV chunk scan inside the significand loop: updates non_zero_start/finish.
+ * Returns -1 if no delimiter found in this chunk (caller advances by chunk_vl_out);
+ * otherwise the byte offset of the first delimiter/invalid byte. Advance through
+ * non-digits via the returned offset. */
+LIGHTER_TARGET_RVV
+static intptr_t lighter_significand_chunk_rvv(uint8_t* i, uint8_t* end, uint8_t** non_zero_start, uint8_t** non_zero_finish, size_t* chunk_vl_out) {
+  size_t n = (size_t)(end - i);
+  size_t vl = __riscv_vsetvl_e8m1(n);
+  *chunk_vl_out = vl;
+  vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
+  vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
+  vbool8_t m_dot = __riscv_vmseq_vx_u8m1_b8(chunk, '.', vl);
+  vbool8_t m_exp = __riscv_vmor_mm_b8(__riscv_vmseq_vx_u8m1_b8(chunk, 'e', vl), __riscv_vmseq_vx_u8m1_b8(chunk, 'E', vl), vl);
+  vbool8_t m_delimit = __riscv_vmor_mm_b8(m_dot, m_exp, vl);
+  vbool8_t m_invalid = __riscv_vmnot_m_b8(m_digit, vl);
+  intptr_t action = __riscv_vfirst_m_b8(__riscv_vmor_mm_b8(m_delimit, m_invalid, vl), vl);
+  vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
+  intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
+  intptr_t scan_end = (action >= 0) ? action : (intptr_t)vl;
+  if (fnz >= 0 && fnz < scan_end) {
+    if (LIGHTER_LIKELY(!*non_zero_start)) {
+      *non_zero_start = i + fnz;
+    }
+    for (intptr_t j = scan_end - 1; j >= fnz; --j) {
+      if (i[j] >= '1' && i[j] <= '9') {
+        *non_zero_finish = i + j;
+        break;
+      }
+    }
+  }
+  return action;
+}
+
+/** RVV chunk scan inside the exponent loop: returns offset of first non-digit
+ * (or -1 if all digits in this chunk), and writes the chunk vl to *chunk_vl_out. */
+LIGHTER_TARGET_RVV
+static intptr_t lighter_exponent_chunk_rvv(uint8_t* i, uint8_t* end, size_t* chunk_vl_out) {
+  size_t n = (size_t)(end - i);
+  size_t vl = __riscv_vsetvl_e8m1(n);
+  *chunk_vl_out = vl;
+  vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
+  vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
+  return __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m_digit, vl), vl);
 }
 #endif
 
@@ -434,52 +480,14 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
         continue;
       }
     }
-#elif LIGHTER_PLATFORM_RISCV
+#elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
     if (has_rvv && i < data->data_end) {
-      size_t n = (size_t)(data->data_end - i);
-      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-      vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
-      vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
-      vbool8_t m_dot = __riscv_vmseq_vx_u8m1_b8(chunk, '.', vl);
-      vbool8_t m_exp = __riscv_vmor_mm_b8(__riscv_vmseq_vx_u8m1_b8(chunk, 'e', vl), __riscv_vmseq_vx_u8m1_b8(chunk, 'E', vl), vl);
-      vbool8_t m_delimit = __riscv_vmor_mm_b8(m_dot, m_exp, vl);
-      vbool8_t m_invalid = __riscv_vmnot_m_b8(m_digit, vl);
-      intptr_t action = __riscv_vfirst_m_b8(__riscv_vmor_mm_b8(m_delimit, m_invalid, vl), vl);
-
+      size_t chunk_vl;
+      intptr_t action = lighter_significand_chunk_rvv(i, data->data_end, &non_zero_start, &non_zero_finish, &chunk_vl);
       if (LIGHTER_UNLIKELY(action >= 0)) {
-        {
-          vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
-          intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
-          if (fnz >= 0 && fnz < action) {
-            if (LIGHTER_LIKELY(!non_zero_start)) {
-              non_zero_start = i + fnz;
-            }
-            for (intptr_t j = action - 1; j >= fnz; --j) {
-              if (i[j] >= '1' && i[j] <= '9') {
-                non_zero_finish = i + j;
-                break;
-              }
-            }
-          }
-        }
         i += action;
       } else {
-        {
-          vbool8_t m_nonzero = __riscv_vmand_mm_b8(m_digit, __riscv_vmsne_vx_u8m1_b8(chunk, '0', vl), vl);
-          intptr_t fnz = __riscv_vfirst_m_b8(m_nonzero, vl);
-          if (fnz >= 0) {
-            if (LIGHTER_LIKELY(!non_zero_start)) {
-              non_zero_start = i + fnz;
-            }
-            for (intptr_t j = (intptr_t)vl - 1; j >= fnz; --j) {
-              if (i[j] >= '1' && i[j] <= '9') {
-                non_zero_finish = i + j;
-                break;
-              }
-            }
-          }
-        }
-        i += vl;
+        i += chunk_vl;
         continue;
       }
     }
@@ -571,13 +579,10 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
           continue;
         }
       }
-#elif LIGHTER_PLATFORM_RISCV
+#elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
       if (has_rvv && i < data->data_end) {
-        size_t n = (size_t)(data->data_end - i);
-        size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-        vuint8m1_t chunk = __riscv_vle8_v_u8m1(i, vl);
-        vbool8_t m_digit = lighter_simd_is_digit_rvv(chunk, vl);
-        intptr_t invalid = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m_digit, vl), vl);
+        size_t chunk_vl;
+        intptr_t invalid = lighter_exponent_chunk_rvv(i, data->data_end, &chunk_vl);
         if (LIGHTER_UNLIKELY(invalid >= 0)) {
           if (!exponent_start && invalid > 0) {
             exponent_start = i;
@@ -589,7 +594,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
           if (!exponent_start) {
             exponent_start = i;
           }
-          i += vl;
+          i += chunk_vl;
           continue;
         }
       }

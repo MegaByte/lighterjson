@@ -239,7 +239,10 @@ static inline int lighter_map_expand(LighterMap* m, size_t new_size, uint8_t** o
   }
   m->data = (uint8_t*)mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, m->fd, 0);
   if (m->data == MAP_FAILED) {
-    (void)ftruncate(m->fd, (off_t)old_size);
+    /* Best-effort rollback; if ftruncate fails the file is just left at new_size. */
+    if (ftruncate(m->fd, (off_t)old_size) != 0) {
+      /* nothing more to do */
+    }
     m->data = *old_data_out;
     return -1;
   }

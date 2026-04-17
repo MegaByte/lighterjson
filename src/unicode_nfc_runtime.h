@@ -906,6 +906,25 @@ static inline NfcData* nfc_get_or_load(const char* path) {
 
 /* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
 
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
+/** Scan ASCII-only span with RVV; return updated pointer and set *found_high. */
+LIGHTER_TARGET_RVV
+static const uint8_t* nfc_scan_high_rvv(const uint8_t* p, const uint8_t* end, int* found_high) {
+  while (p < end) {
+    size_t n = end - p;
+    size_t vl = __riscv_vsetvl_e8m1(n);
+    vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
+    vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
+    if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
+      *found_high = 1;
+      break;
+    }
+    p += vl;
+  }
+  return p;
+}
+#endif
+
 /** Return the NFC quick-check result for the UTF-8 span [start, end). */
 static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_neon, int has_rvv) {
   const uint8_t* p = start;
@@ -924,19 +943,9 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
     }
   } else
 #endif
-#if LIGHTER_PLATFORM_RISCV
+#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
       if (has_rvv) {
-    while (p < end) {
-      size_t n = end - p;
-      size_t vl = __riscv_vsetvli(n, __RISCV_E8, __RISCV_M1, __RISCV_TA, __RISCV_MA);
-      vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-      vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
-      if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
-        found_high = 1;
-        break;
-      }
-      p += vl;
-    }
+    p = nfc_scan_high_rvv(p, end, &found_high);
   } else
 #endif
   {

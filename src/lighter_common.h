@@ -30,7 +30,7 @@ typedef struct LighterData {
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */
 static inline void lighter_write_data(LighterData* data, ptrdiff_t index_offset) {
   ptrdiff_t pending = data->rindex - data->lindex;
-  if (pending) {
+  if (pending > 0) {
     if (data->windex != data->lindex) {
       memmove(data->windex, data->lindex, (size_t)pending);
     }

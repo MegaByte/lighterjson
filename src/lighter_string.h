@@ -134,7 +134,7 @@ static inline void lighter_string_do_unicode(LighterData* data) {
 
 /** Handle a JSON string escape sequence at rindex. */
 static inline void lighter_string_do_escape(LighterData* data) {
-  if (LIGHTER_UNLIKELY(data->rindex + 1 >= data->data_end)) {
+  if (data->rindex + 1 >= data->data_end) {
     /* Trailing '\\' at end of input — advance past it to avoid infinite loop. */
     ++(data->rindex);
     return;

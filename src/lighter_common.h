@@ -75,11 +75,7 @@ static inline uint8_t* lighter_write_utf8_scalar(uint8_t* dst, uint32_t cp) {
 /** Portable signed 64-bit addition overflow check. */
 #if defined(__GNUC__) || defined(__clang__)
   #define lighter_add_overflow(a, b, res) __builtin_add_overflow(a, b, res)
-  #define LIGHTER_LIKELY(x) __builtin_expect(!!(x), 1)
-  #define LIGHTER_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-  #define LIGHTER_LIKELY(x) (x)
-  #define LIGHTER_UNLIKELY(x) (x)
 static inline int lighter_add_overflow(int64_t a, int64_t b, int64_t* res) {
   if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
     return 1;

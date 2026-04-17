@@ -906,6 +906,23 @@ static inline NfcData* nfc_get_or_load(const char* path) {
 
 /* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
 
+#if LIGHTER_PLATFORM_X86
+/** Scan for any byte >= 0x80 in 32-byte chunks. Returns the advanced pointer
+ *  and sets *found to 1 if a high byte was detected. */
+LIGHTER_TARGET_AVX2
+static const uint8_t* nfc_scan_high_avx2(const uint8_t* p, const uint8_t* end, int* found) {
+  while (p + 32 <= end) {
+    __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+    if (_mm256_movemask_epi8(chunk) != 0) {
+      *found = 1;
+      return p;
+    }
+    p += 32;
+  }
+  return p;
+}
+#endif /* LIGHTER_PLATFORM_X86 */
+
 #if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
 /** Scan ASCII-only span with RVV; return updated pointer and set *found_high. */
 LIGHTER_TARGET_RVV
@@ -926,10 +943,15 @@ static const uint8_t* nfc_scan_high_rvv(const uint8_t* p, const uint8_t* end, in
 #endif
 
 /** Return the NFC quick-check result for the UTF-8 span [start, end). */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_neon, int has_rvv) {
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx2, int has_neon, int has_rvv) {
   const uint8_t* p = start;
   int found_high = 0;
 
+#if LIGHTER_PLATFORM_X86
+  if (has_avx2) {
+    p = nfc_scan_high_avx2(p, end, &found_high);
+  } else
+#endif
 #if LIGHTER_PLATFORM_ARM64
   if (has_neon) {
     while (p + 16 <= end) {

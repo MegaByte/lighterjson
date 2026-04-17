@@ -261,7 +261,7 @@ static void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_ascii) 
 #endif
 
 /** Finalize parsing when rindex is positioned at the string tail or closing quote. */
-static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_neon, int has_rvv, int saw_non_ascii) {
+static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv, int saw_non_ascii) {
   if (data->rindex >= data->data_end) {
     return 1;
   }
@@ -273,7 +273,7 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
       /* lindex points at the opening quote; rindex points at the closing quote.
        * Content is [lindex+1, rindex). Flush the pending segment (opening quote plus
        * content), then normalize the content in place if needed. */
-      if (!disable_nfc && saw_non_ascii && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_neon, has_rvv) != NFC_QC_YES) {
+      if (!disable_nfc && saw_non_ascii && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
         ptrdiff_t pending = data->rindex - data->lindex;
         lighter_write_data(data, 1); /* flush [opening quote .. content), consume closing quote */
         /* After flush: windex moved forward by `pending` bytes; output now has
@@ -327,7 +327,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   if (has_avx2) {
     while (data->rindex < data->data_end) {
       lighter_simd_avx2_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
         lighter_string_finish(data);
         return;
       }
@@ -347,7 +347,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   if (has_rvv) {
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
         lighter_string_finish(data);
         return;
       }
@@ -395,7 +395,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
       }
       ++data->rindex;
     }
-    if (lighter_string_tail_at_end(data, disable_nfc, has_neon, has_rvv, saw_non_ascii)) {
+    if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
       lighter_string_finish(data);
       return;
     }

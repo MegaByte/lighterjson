@@ -284,7 +284,8 @@ static void nfc_skip_to_next_line(const char** p, const char* fend) {
   }
 }
 
-static NfcData* nfc_load_from_ucd(const char* ucd_dir) {
+/** Load NFC tables directly from the UCD text files in ucd_dir. */
+static NFC_UNUSED NfcData* nfc_load_from_ucd(const char* ucd_dir) {
   NfcData* d = (NfcData*)calloc(1, sizeof(NfcData));
   uint8_t* raw_ccc = (uint8_t*)calloc(NFC_MAX_CP, 1);
   uint8_t* raw_qc = (uint8_t*)calloc(NFC_MAX_CP, 1);

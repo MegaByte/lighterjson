@@ -48,6 +48,7 @@ typedef struct Context {
   int quiet;
   int newlines;
   int disable_nfc;
+  int force_utf8_output;
   int async_io;
   int has_avx2;
   int has_neon;
@@ -378,8 +379,7 @@ static void do_value(LighterData* data, Context* ctx, int line_start, Bitfield* 
         data->lindex = data->rindex;
     }
   }
-  /* EOF reached. Flush any pending segment (e.g. trailing whitespace) so the
-   * caller can decide whether to write closures past the original input. */
+  /* Flush any trailing pending bytes before EOF closure handling. */
   lighter_write_data(data, 0);
   *out_comma_ok = comma_ok;
 }
@@ -526,7 +526,7 @@ static int do_file(Context* ctx, char filename[]) {
   }
 
   size_t written = (size_t)(data.windex - data.data_start);
-  if (orig_encoding != LIGHTER_ENC_UTF8 && written > 0) {
+  if (!ctx->force_utf8_output && orig_encoding != LIGHTER_ENC_UTF8 && written > 0) {
     size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
     if ((written > back_size ? written : back_size) > map_capacity) {
       fprintf(stderr, "Could not re-transcode %s in place\n", filename);
@@ -700,6 +700,7 @@ void usage(char progname[], int status) {
           "JSON minifier\n"
           "Options:\n"
           "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -8   Force UTF-8 output\n"
           "  -n   Process NDJSON/JSON Lines\n"
           "  -N   Process NDJSON, preserving empty lines\n"
           "  -s   Block until writes are flushed to disk (default: async)\n"
@@ -718,6 +719,7 @@ int main(int argc, char* argv[]) {
       .quiet = 0,
       .newlines = 0,
       .disable_nfc = 0,
+      .force_utf8_output = 0,
       .async_io = 1,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
       .has_avx2 = lighter_cpu_supports_avx2(),
@@ -744,6 +746,9 @@ int main(int argc, char* argv[]) {
           break;
         case 'q':
           ctx.quiet = 1;
+          break;
+        case '8':
+          ctx.force_utf8_output = 1;
           break;
         case 'n':
           ctx.newlines = 1;

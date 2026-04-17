@@ -377,7 +377,7 @@ static int nfc_compose_buf(const NfcData* d, uint32_t* buf, int len) {
 /* ── Incremental NFC: normalize between starters ──────────────────── */
 
 /** Normalize [start, end) to NFC in place and return the new end pointer. */
-static uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start, uint8_t* end) {
+static NFC_UNUSED uint8_t* nfc_normalize_utf8_incremental(const NfcData* d, uint8_t* start, uint8_t* end) {
   if (!d) {
     return end;
   }

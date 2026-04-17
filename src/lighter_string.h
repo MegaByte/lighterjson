@@ -310,8 +310,7 @@ static inline void lighter_string_close_at_eof(LighterData* data) {
   }
 }
 
-/** Common return wrapper: if rindex hit EOF without a closing quote, synthesize
- * one. */
+/** Append a synthetic closing quote when the string runs to EOF. */
 static inline void lighter_string_finish(LighterData* data) {
   if (data->rindex >= data->data_end) {
     lighter_string_close_at_eof(data);
@@ -337,10 +336,10 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   }
 #endif
 
-  /* ARM64 uses the 8-byte SWAR path here; the dedicated NEON string-skip helper
-   * is retained only to keep the implementation available. */
+  /* ARM64 uses the 8-byte SWAR path here. Keep a reference to the NEON helper
+   * so the target-specific implementation remains compiled. */
 #if LIGHTER_PLATFORM_ARM64
-  (void)lighter_simd_neon_string_skip; /* silence unused warning */
+  (void)lighter_simd_neon_string_skip;
 #endif
 
 #if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)

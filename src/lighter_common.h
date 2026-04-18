@@ -25,6 +25,9 @@ typedef struct LighterData {
                         * EOF for truncated input). */
   int needs_quote;     /* set when an unterminated string couldn't fit a synthetic
                           '"' */
+  int saw_non_ascii;   /* set whenever any non-ASCII byte was written to output;
+                          used to skip the post-parse ASCII detection scan when
+                          re-transcoding back to a non-UTF-8 encoding. */
 } LighterData;
 
 /** Copy pending segment [lindex, rindex) and advance by index_offset. */

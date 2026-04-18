@@ -433,34 +433,56 @@ static int do_file(Context* ctx, char filename[]) {
   size_t orig_file_size = map.size; /* preserve for final savings report */
 
   if (orig_encoding != LIGHTER_ENC_UTF8) {
-    size_t max_utf8 = (orig_encoding == LIGHTER_ENC_UTF16LE || orig_encoding == LIGHTER_ENC_UTF16BE)
-                          ? (actual_size * LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR / LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR) + LIGHTER_TRANSCODE_SLACK_BYTES
-                          : actual_size + LIGHTER_TRANSCODE_SLACK_BYTES;
-    uint8_t* old_data = NULL;
-    size_t old_size_full = 0;
-
-    if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
-      fprintf(stderr, "Could not expand file for transcoding\n");
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
-    }
-
-    uint8_t* transcode_src;
-    if (old_data) {
-      transcode_src = old_data + bom_size;
-    } else {
-      /* Windows fallback: move to end of new mapping to avoid overlap issues */
-      memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
-      transcode_src = map.data + max_utf8 - actual_size;
-    }
-
     size_t utf8_size;
-    lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_encoding, &utf8_size);
-    map.size = utf8_size;
-    map_capacity = max_utf8;
+    if (orig_encoding == LIGHTER_ENC_UTF32LE || orig_encoding == LIGHTER_ENC_UTF32BE) {
+      /* UTF-32 → UTF-8 is always strictly smaller (4 source bytes per codepoint
+       * become at most 4 UTF-8 bytes, usually fewer). Output never overtakes
+       * input, so we can transcode in place without expanding the mapping. */
+      if (lighter_utf32_is_ascii_only(map.data + bom_size, actual_size, orig_encoding == LIGHTER_ENC_UTF32LE)) {
+        /* All codepoints < 0x80: one UTF-8 byte each. Pack low byte of each
+         * 32-bit codepoint into a compact UTF-8 byte stream. */
+        lighter_transcode_utf32_ascii_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding == LIGHTER_ENC_UTF32LE, &utf8_size);
+      } else {
+        lighter_transcode_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding, &utf8_size);
+      }
+      map.size = utf8_size;
+    } else if (lighter_utf16_is_ascii_only(map.data + bom_size, actual_size, orig_encoding == LIGHTER_ENC_UTF16LE)) {
+      /* UTF-16 ASCII-only: every codepoint < 0x80, so each pair of source bytes
+       * becomes a single UTF-8 byte. Output is half the input size and never
+       * overtakes the read pointer; transcode in place via a tight pack loop. */
+      lighter_transcode_utf16_ascii_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding == LIGHTER_ENC_UTF16LE, &utf8_size);
+      map.size = utf8_size;
+    } else {
+      /* UTF-16 can grow: a BMP non-Latin codepoint occupies 2 UTF-16 bytes but
+       * 3 UTF-8 bytes. Worst case is 1.5x. Expand the mapping first, then
+       * transcode using the relocated source mapping. */
+      size_t max_utf8 = (actual_size * LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR / LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR) + LIGHTER_TRANSCODE_SLACK_BYTES;
+      uint8_t* old_data = NULL;
+      size_t old_size_full = 0;
+      if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
+        fprintf(stderr, "Could not expand file for transcoding\n");
+        lighter_map_close(&map);
+        return EXIT_FAILURE;
+      }
 
-    if (old_data) {
-      lighter_map_unmap(old_data, old_size_full);
+      uint8_t* transcode_src;
+      if (old_data) {
+        /* Two distinct mappings: read from the old, write into the new. */
+        transcode_src = old_data + bom_size;
+      } else {
+        /* In-place grow gave us one mapping covering both source and destination.
+         * Slide the source to the tail so the forward write can't overrun it. */
+        memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
+        transcode_src = map.data + max_utf8 - actual_size;
+      }
+
+      lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_encoding, &utf8_size);
+      map.size = utf8_size;
+      map_capacity = max_utf8;
+
+      if (old_data) {
+        lighter_map_unmap(old_data, old_size_full);
+      }
     }
     bom_size = 0; /* BOM was already stripped during transcoding */
   }
@@ -476,6 +498,7 @@ static int do_file(Context* ctx, char filename[]) {
   data.rindex = map.data + bom_size;
   data.lindex = data.rindex;
   data.needs_quote = 0;
+  data.saw_non_ascii = 0;
 
   int exit_code = EXIT_SUCCESS;
   Bitfield parent_types;
@@ -527,16 +550,49 @@ static int do_file(Context* ctx, char filename[]) {
 
   size_t written = (size_t)(data.windex - data.data_start);
   if (!ctx->force_utf8_output && orig_encoding != LIGHTER_ENC_UTF8 && written > 0) {
-    size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
-    if ((written > back_size ? written : back_size) > map_capacity) {
-      fprintf(stderr, "Could not re-transcode %s in place\n", filename);
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
+    /* Fast path: minified output is pure ASCII (very common — JSON minifier
+     * strips whitespace and unicode-escapes anything non-ASCII unless the
+     * input had raw multibyte UTF-8 characters in strings). For ASCII output,
+     * each input byte expands to a fixed-width zero-padded value in the
+     * destination encoding — vectorizable as a widening write.
+     *
+     * data.saw_non_ascii was OR'd by the string parser whenever any non-ASCII
+     * byte was written, so checking it is free vs. rescanning the buffer. */
+    if (!data.saw_non_ascii) {
+      size_t back_size;
+      int is_le;
+      if (orig_encoding == LIGHTER_ENC_UTF32LE || orig_encoding == LIGHTER_ENC_UTF32BE) {
+        back_size = written * 4;
+        is_le = (orig_encoding == LIGHTER_ENC_UTF32LE);
+        if (back_size > map_capacity) {
+          fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+          lighter_map_close(&map);
+          return EXIT_FAILURE;
+        }
+        lighter_transcode_utf8_ascii_to_utf32(data.data_start, written, map.data + back_size, is_le);
+      } else {
+        back_size = written * 2;
+        is_le = (orig_encoding == LIGHTER_ENC_UTF16LE);
+        if (back_size > map_capacity) {
+          fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+          lighter_map_close(&map);
+          return EXIT_FAILURE;
+        }
+        lighter_transcode_utf8_ascii_to_utf16(data.data_start, written, map.data + back_size, is_le);
+      }
+      written = back_size;
+    } else {
+      size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
+      if ((written > back_size ? written : back_size) > map_capacity) {
+        fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+        lighter_map_close(&map);
+        return EXIT_FAILURE;
+      }
+      /* BOM is stripped; transcode preserves the original byte order. Byte order is
+       * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
+      lighter_transcode_from_utf8_backward(data.data_start, written, orig_encoding, map.data + back_size);
+      written = back_size;
     }
-    /* BOM is stripped; transcode preserves the original byte order. Byte order is
-     * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
-    lighter_transcode_from_utf8_backward(data.data_start, written, orig_encoding, map.data + back_size);
-    written = back_size;
   }
 
   if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {

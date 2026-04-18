@@ -58,7 +58,7 @@ static inline uint64_t lighter_string_hex_value(LighterData* data) {
 }
 
 /** Decode one JSON \u escape and append its UTF-8 form to the output. */
-static inline void lighter_string_do_unicode(LighterData* data) {
+static inline void lighter_string_do_unicode(LighterData* data, int* saw_non_ascii) {
   uint64_t value = lighter_string_hex_value(data);
   if (value == (uint64_t)INT64_MAX) {
     /* Malformed \uXXXX: pass through the remaining bytes as-is so we don't
@@ -128,12 +128,14 @@ static inline void lighter_string_do_unicode(LighterData* data) {
     }
     *data->windex++ = (uint8_t)value;
   } else {
+    /* Non-ASCII codepoint: NFC normalization needs to consider this string. */
+    *saw_non_ascii = 1;
     data->windex = lighter_write_utf8_scalar(data->windex, (uint32_t)value);
   }
 }
 
 /** Handle a JSON string escape sequence at rindex. */
-static inline void lighter_string_do_escape(LighterData* data) {
+static inline void lighter_string_do_escape(LighterData* data, int* saw_non_ascii) {
   if (data->rindex + 1 >= data->data_end) {
     /* Trailing '\\' at end of input — advance past it to avoid infinite loop. */
     ++(data->rindex);
@@ -144,7 +146,7 @@ static inline void lighter_string_do_escape(LighterData* data) {
       lighter_write_data(data, 0); /* flush before \u */
       data->rindex += 2;           /* skip \u */
       data->lindex = data->rindex;
-      lighter_string_do_unicode(data);
+      lighter_string_do_unicode(data, saw_non_ascii);
       break;
     case '"':
     case '\\':
@@ -260,29 +262,43 @@ static void lighter_simd_rvv_string_skip(LighterData* data, int* saw_non_ascii) 
 }
 #endif
 
-/** Finalize parsing when rindex is positioned at the string tail or closing quote. */
-static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv, int saw_non_ascii) {
+/** Finalize parsing when rindex is positioned at the string tail or closing quote.
+ * out_quote_start is the windex position of the opening '"' in the output buffer
+ * (saved by lighter_do_string before the first byte of this string was processed);
+ * the NFC normalizer reads the full output content range from there. */
+static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv, int* saw_non_ascii,
+                                             uint8_t* out_quote_start) {
   if (data->rindex >= data->data_end) {
     return 1;
   }
   switch (*data->rindex) {
     case '\\':
-      lighter_string_do_escape(data);
+      lighter_string_do_escape(data, saw_non_ascii);
       break;
     case '"': {
-      /* lindex points at the opening quote; rindex points at the closing quote.
-       * Content is [lindex+1, rindex). Flush the pending segment (opening quote plus
-       * content), then normalize the content in place if needed. */
-      if (!disable_nfc && saw_non_ascii && nfc_quick_check("lighter.nfc", data->lindex + 1, data->rindex, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
-        ptrdiff_t pending = data->rindex - data->lindex;
-        lighter_write_data(data, 1); /* flush [opening quote .. content), consume closing quote */
-        /* After flush: windex moved forward by `pending` bytes; output now has
-         * [windex-pending, windex) = [opening quote .. content). Normalize content. */
-        uint8_t* str_content_start = data->windex - pending + 1;
+      /* lindex points at the opening quote (or last escape boundary); rindex points
+       * at the closing quote. Content is [lindex+1, rindex) in the source plus any
+       * decoded escape bytes already at [out_quote_start+1, windex). Flush the tail,
+       * then normalize the full output content range if needed. */
+      if (*saw_non_ascii) {
+        data->saw_non_ascii = 1; /* propagate up so do_file can skip the ASCII rescan */
+      }
+      if (!disable_nfc && *saw_non_ascii) {
+        lighter_write_data(data, 1); /* flush [lindex .. rindex), consume closing quote */
+        uint8_t* str_content_start = out_quote_start + 1;
         uint8_t* str_content_end = data->windex;
-        uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
-        /* Append the closing quote immediately after the (possibly shorter) content. */
-        data->windex = new_end;
+        /* LIGHTERJSON_NFC_NO_QUICKCHECK=1 skips the dedicated prescan and goes straight
+         * to incremental normalization (which has its own internal byte-scan early-exit).
+         * Useful for benchmarking the quick-check's contribution. */
+        static int qc_disabled = -1;
+        if (qc_disabled < 0) {
+          const char* e = getenv("LIGHTERJSON_NFC_NO_QUICKCHECK");
+          qc_disabled = (e && *e && *e != '0');
+        }
+        if (qc_disabled || nfc_quick_check("lighter.nfc", str_content_start, str_content_end, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
+          uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
+          data->windex = new_end;
+        }
         *data->windex++ = '"';
       } else {
         ++(data->rindex);
@@ -319,6 +335,11 @@ static inline void lighter_string_finish(LighterData* data) {
 
 /** Parse the JSON string at rindex and optionally NFC-normalize its content. */
 static inline void lighter_do_string(LighterData* data, int disable_nfc, int has_avx2, int has_neon, int has_rvv) {
+  /* Save windex BEFORE consuming the opening quote: with windex==lindex at entry,
+   * after the first flush the opening '"' lands at this exact byte in the output.
+   * We need this to bound the post-escape NFC content range, since escape decoding
+   * writes non-ASCII bytes directly to windex outside [lindex, rindex). */
+  uint8_t* out_quote_start = data->windex;
   ++(data->rindex);
   int saw_non_ascii = 0;
 
@@ -326,7 +347,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   if (has_avx2) {
     while (data->rindex < data->data_end) {
       lighter_simd_avx2_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, &saw_non_ascii, out_quote_start)) {
         lighter_string_finish(data);
         return;
       }
@@ -346,7 +367,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   if (has_rvv && LIGHTER_RVV_SITE_ENABLED("string")) {
     while (data->rindex < data->data_end) {
       lighter_simd_rvv_string_skip(data, &saw_non_ascii);
-      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+      if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, &saw_non_ascii, out_quote_start)) {
         lighter_string_finish(data);
         return;
       }
@@ -394,7 +415,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
       }
       ++data->rindex;
     }
-    if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, saw_non_ascii)) {
+    if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, &saw_non_ascii, out_quote_start)) {
       lighter_string_finish(data);
       return;
     }

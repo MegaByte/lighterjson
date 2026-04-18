@@ -64,7 +64,7 @@ echo "runs/combo:  $RUNS (best-of)"
 echo ""
 
 INPUTS=()
-for name in twitter_big.json canada_big.json citm_catalog_big.json; do
+for name in twitter_big.json canada_big.json citm_catalog_big.json nfc_stress_big.json; do
   if [ -s "$CORPUS_DIR/$name" ]; then
     INPUTS+=("$CORPUS_DIR/$name")
   fi

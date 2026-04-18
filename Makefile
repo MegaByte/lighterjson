@@ -1,9 +1,9 @@
 CC = cc
 CFLAGS = -O3 -Wall
 
-all: lighterjson
+all: lighterjson lighter.nfc
 
-lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
+lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_cpu.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/lighter_transcode.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
 	$(CC) $(CFLAGS) -Isrc -o lighterjson src/lighterjson.c
 
 tools/gen_unicode_tables: tools/gen_unicode_tables.c src/unicode_nfc_builder.h src/unicode_nfc_shared.h
@@ -23,12 +23,13 @@ ucd/NormalizationTest.txt:
 	mkdir -p ucd
 	curl -s -o $@ $(UCD_URL)/NormalizationTest.txt
 
-ucd: ucd/UnicodeData.txt ucd/DerivedNormalizationProps.txt ucd/CompositionExclusions.txt ucd/NormalizationTest.txt
+UCD_FILES = ucd/UnicodeData.txt ucd/DerivedNormalizationProps.txt ucd/CompositionExclusions.txt ucd/NormalizationTest.txt
+ucd: $(UCD_FILES)
 
 test_nfc: tools/test_nfc.c src/unicode_nfc_shared.h src/unicode_nfc_runtime.h src/unicode_nfc_builder.h
 	$(CC) $(CFLAGS) -Isrc -o test_nfc tools/test_nfc.c
 
-test: test_nfc lighter.nfc ucd
+test: test_nfc lighter.nfc $(UCD_FILES)
 	./test_nfc lighter.nfc ucd
 
 test-json: lighterjson lighter.nfc
@@ -52,7 +53,7 @@ test-riscv-novec:
 	  'apt-get update >/dev/null && apt-get install -y -qq gcc make python3 curl >/dev/null && \
 	   cd /src && make clean && make test-json'
 
-lighter.nfc: tools/gen_unicode_tables ucd
+lighter.nfc: tools/gen_unicode_tables $(UCD_FILES)
 	./tools/gen_unicode_tables ucd > lighter.nfc
 
 clean:

@@ -70,11 +70,19 @@ nothing measurable on this corpus and may be a candidate for removal.
 
 ## Corpus
 
-Standard `serde-rs/json-benchmark` trio:
+Standard `serde-rs/json-benchmark` trio plus a synthetic NFC stress file:
 
-- `twitter.json` — social-media-style records (mixed strings, ids, nested)
-- `canada.json` — GeoJSON coordinate arrays (number-heavy)
+- `twitter.json` — social-media-style records (mixed strings, ids, nested);
+  ~15% non-ASCII (Japanese), but already in NFC, so the heavy normalization
+  path is rarely taken
+- `canada.json` — GeoJSON coordinate arrays (number-heavy, 0% non-ASCII)
 - `citm_catalog.json` — event catalog with many short string keys
+  (~70% whitespace from indentation)
+- `nfc_stress.json` — generated locally; multilingual text (Latin diacritics,
+  Vietnamese, Greek, Hangul) deliberately emitted in NFD form so combining
+  marks are detached from base letters. Forces the non-ASCII prescan and
+  the slow quick-check / canonical-decomposition / reordering paths.
 
 Each is replicated 20× (by default) and saved as `*_big.json` so a single
-run takes long enough to measure reliably.
+run takes long enough to measure reliably. Tunables:
+`BENCH_NFC_RECORDS=100000 bench/setup.sh` for the synthetic file size.

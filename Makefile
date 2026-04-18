@@ -1,10 +1,22 @@
 CC = cc
 CFLAGS = -O3 -Wall
 
+# OpenMP parallelizes batch processing of files in directory mode
+# (OMP_NUM_THREADS controls parallelism). Auto-detect by probing the compiler;
+# override with OMPFLAGS= to disable or OMPFLAGS="-fopenmp ..." to force.
+# Apple clang needs explicit libomp paths (brew install libomp).
+OMPFLAGS := $(shell \
+  if $(CC) -fopenmp -dM -E - < /dev/null > /dev/null 2>&1; then \
+    echo -fopenmp; \
+  elif [ -f /opt/homebrew/opt/libomp/include/omp.h ] && \
+       $(CC) -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib -lomp -dM -E - < /dev/null > /dev/null 2>&1; then \
+    echo "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib -lomp"; \
+  fi)
+
 all: lighterjson lighter.nfc
 
 lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_cpu.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/lighter_transcode.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
-	$(CC) $(CFLAGS) -Isrc -o lighterjson src/lighterjson.c
+	$(CC) $(CFLAGS) $(OMPFLAGS) -Isrc -o lighterjson src/lighterjson.c
 
 tools/gen_unicode_tables: tools/gen_unicode_tables.c src/unicode_nfc_builder.h src/unicode_nfc_shared.h
 	$(CC) $(CFLAGS) -Isrc -o tools/gen_unicode_tables tools/gen_unicode_tables.c

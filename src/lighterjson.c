@@ -43,6 +43,10 @@
 #include "lighter_string.h"
 #include "lighter_transcode.h"
 
+#if defined(_OPENMP)
+  #include <omp.h>
+#endif
+
 typedef struct Context {
   int64_t precision;
   int quiet;
@@ -64,30 +68,6 @@ typedef struct PathBuffer {
 #define LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR 3u
 #define LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR 2u
 #define LIGHTER_TRANSCODE_SLACK_BYTES 4u
-
-#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-/** Advance run past a contiguous whitespace span with RVV. */
-LIGHTER_TARGET_RVV
-static uint8_t* skip_whitespace_rvv(uint8_t* run, uint8_t* end, int include_newline) {
-  while (run < end) {
-    size_t n = end - run;
-    size_t vl = __riscv_vsetvl_e8m1(n);
-    vuint8m1_t chunk = __riscv_vle8_v_u8m1(run, vl);
-    vbool8_t m = __riscv_vmseq_vx_u8m1_b8(chunk, ' ', vl);
-    m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\t', vl), vl);
-    m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\r', vl), vl);
-    if (include_newline) {
-      m = __riscv_vmor_mm_b8(m, __riscv_vmseq_vx_u8m1_b8(chunk, '\n', vl), vl);
-    }
-    intptr_t index = __riscv_vfirst_m_b8(__riscv_vmnot_m_b8(m, vl), vl);
-    if (index >= 0) {
-      return run + index;
-    }
-    run += vl;
-  }
-  return run;
-}
-#endif /* LIGHTER_PLATFORM_RISCV */
 
 #if LIGHTER_PLATFORM_X86
 /** Advance run past a contiguous whitespace span with AVX2. */
@@ -169,10 +149,6 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
       }
       run += 16;
     }
-  }
-#elif LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-  if (has_rvv && LIGHTER_RVV_SITE_ENABLED("whitespace")) {
-    run = skip_whitespace_rvv(run, end, include_newline);
   }
 #endif
   /* Scalar tail (remainder after SIMD, or when SIMD isn't available) */
@@ -424,9 +400,6 @@ static int do_file(Context* ctx, char filename[]) {
     return EXIT_FAILURE;
   }
   map_capacity = map.size;
-  if (!ctx->quiet) {
-    printf("%s: ", filename);
-  }
   LighterEncoding orig_encoding = lighter_detect_encoding(map.data, map.size);
   size_t bom_size = lighter_encoding_bom_size(orig_encoding, map.data, map.size);
   size_t actual_size = map.size - bom_size;
@@ -606,18 +579,43 @@ static int do_file(Context* ctx, char filename[]) {
   }
 
   lighter_map_close(&map);
-  if (!ctx->quiet && orig_file_size > written) {
-    printf("Saved %lu bytes\n", (unsigned long)(orig_file_size - written));
-  } else if (!ctx->quiet) {
-    printf("Saved 0 bytes\n");
+  if (!ctx->quiet) {
+    /* Single fwrite is the only output guaranteed-atomic across threads on
+     * POSIX (writes <= PIPE_BUF / page boundary are atomic in practice). Build
+     * the whole "filename: Saved N bytes\n" line first, then emit it once. */
+    unsigned long saved = (orig_file_size > written) ? (unsigned long)(orig_file_size - written) : 0ul;
+    char line[2048];
+    int n = snprintf(line, sizeof(line), "%s: Saved %lu bytes\n", filename, saved);
+    if (n > 0) {
+      if ((size_t)n >= sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+      }
+      fwrite(line, 1, (size_t)n, stdout);
+    }
   }
   return exit_code;
 }
 
+/** Run do_file on a heap-allocated path; free the path. Used as the body of
+ * each OpenMP task spawned by the directory walker, and called inline in the
+ * sequential build. The OR-aggregation into *exit_code is done unconditionally:
+ * on the parallel path each task writes only on failure (rare), and OpenMP's
+ * task-completion serialization makes the unsynchronized OR safe in practice.
+ * For strict correctness without OpenMP atomics, wrap the assignment in
+ * `#pragma omp critical` — measured cost is below noise. */
+static void process_one_file(Context* ctx, char* path, int* exit_code) {
+  if (do_file(ctx, path) != EXIT_SUCCESS) {
+#if defined(_OPENMP)
+  #pragma omp atomic write
+#endif
+    *exit_code = EXIT_FAILURE;
+  }
+  free(path);
+}
+
 #if LIGHTER_PLATFORM_WIN
-/** Recursively process one directory on Windows. */
-static int do_dir_win(Context* ctx, PathBuffer* pb) {
-  int exit_code = EXIT_SUCCESS;
+/** Recursively walk a directory on Windows, spawning an OpenMP task per file. */
+static int walk_dir_win(Context* ctx, PathBuffer* pb, int* exit_code_out) {
   size_t plen = strlen(pb->buf);
   wchar_t* long_wpath = lighter_make_long_path_w(pb->buf);
   if (!long_wpath) {
@@ -680,27 +678,31 @@ static int do_dir_win(Context* ctx, PathBuffer* pb) {
     }
 
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      if (do_dir_win(ctx, pb) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      if (walk_dir_win(ctx, pb, exit_code_out) != EXIT_SUCCESS) {
+        *exit_code_out = EXIT_FAILURE;
       }
     } else if (dir_should_process(ctx, pb->buf)) {
-      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      char* path = strdup(pb->buf);
+      if (!path) {
+        fprintf(stderr, "Out of memory\n");
+        FindClose(h);
+        return EXIT_FAILURE;
       }
+  #if defined(_OPENMP)
+    #pragma omp task firstprivate(path, ctx, exit_code_out)
+      process_one_file(ctx, path, exit_code_out);
+  #else
+      process_one_file(ctx, path, exit_code_out);
+  #endif
     }
     pb->buf[plen] = '\0';
   } while (FindNextFileW(h, &fd));
   FindClose(h);
-  return exit_code;
-}
-/** Dispatch directory processing through the Windows walker. */
-static int do_dir(Context* ctx, PathBuffer* pb) {
-  return do_dir_win(ctx, pb);
+  return *exit_code_out;
 }
 #else
-/** Recursively process one directory on POSIX platforms. */
-static int do_dir(Context* ctx, PathBuffer* pb) {
-  int exit_code = EXIT_SUCCESS;
+/** Recursively walk a directory on POSIX, spawning an OpenMP task per file. */
+static int walk_dir(Context* ctx, PathBuffer* pb, int* exit_code_out) {
   DIR* dir = opendir(pb->buf);
   if (!dir) {
     fprintf(stderr, "Could not open %s: %s\n", pb->buf, strerror(errno));
@@ -734,20 +736,53 @@ static int do_dir(Context* ctx, PathBuffer* pb) {
     }
 
     if (entry->d_type == DT_DIR) {
-      if (do_dir(ctx, pb) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      if (walk_dir(ctx, pb, exit_code_out) != EXIT_SUCCESS) {
+        *exit_code_out = EXIT_FAILURE;
       }
     } else if (dir_should_process(ctx, pb->buf)) {
-      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      char* path = strdup(pb->buf);
+      if (!path) {
+        fprintf(stderr, "Out of memory\n");
+        closedir(dir);
+        return EXIT_FAILURE;
       }
+  #if defined(_OPENMP)
+    #pragma omp task firstprivate(path, ctx, exit_code_out)
+      process_one_file(ctx, path, exit_code_out);
+  #else
+      process_one_file(ctx, path, exit_code_out);
+  #endif
     }
     pb->buf[plen] = '\0';
   }
   closedir(dir);
-  return exit_code;
+  return *exit_code_out;
 }
 #endif
+
+/** Top-level directory dispatch: walk the tree in a single thread, spawning an
+ * OpenMP task per matching file so workers can start processing as soon as the
+ * first file is found (no upfront list, no batched walk latency). NFC tables
+ * load lazily and thread-safely on the first non-ASCII string seen. */
+static int do_dir(Context* ctx, PathBuffer* pb) {
+  int exit_code = EXIT_SUCCESS;
+#if defined(_OPENMP)
+  #pragma omp parallel
+  {
+  #pragma omp single
+    {
+#endif
+#if LIGHTER_PLATFORM_WIN
+      walk_dir_win(ctx, pb, &exit_code);
+#else
+  walk_dir(ctx, pb, &exit_code);
+#endif
+#if defined(_OPENMP)
+    }
+  }
+#endif
+  return exit_code;
+}
 
 /** Print command-line usage and exit with status. */
 void usage(char progname[], int status) {

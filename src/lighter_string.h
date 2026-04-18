@@ -295,7 +295,7 @@ static inline int lighter_string_tail_at_end(LighterData* data, int disable_nfc,
           const char* e = getenv("LIGHTERJSON_NFC_NO_QUICKCHECK");
           qc_disabled = (e && *e && *e != '0');
         }
-        if (qc_disabled || nfc_quick_check("lighter.nfc", str_content_start, str_content_end, has_avx2, has_neon, has_rvv) != NFC_QC_YES) {
+        if (qc_disabled || nfc_quick_check("lighter.nfc", str_content_start, str_content_end, has_avx2, has_neon) != NFC_QC_YES) {
           uint8_t* new_end = nfc_normalize_utf8_incremental(nfc_get_or_load("lighter.nfc"), str_content_start, str_content_end);
           data->windex = new_end;
         }

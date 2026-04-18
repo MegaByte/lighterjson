@@ -891,17 +891,50 @@ bin_fail:
 }
 
 static NfcData* nfc_cached = NULL;
-static int nfc_load_tried = 0;
-/** Return the cached NFC tables, loading them on first use. */
+/* nfc_load_state: 0 = not tried, 1 = load complete (success or failure recorded
+ * in nfc_cached). Atomic CAS gates entry to the loader so concurrent worker
+ * threads serialize on a single load attempt without a heavy mutex. */
+#if defined(__GNUC__) || defined(__clang__)
+static volatile int nfc_load_state = 0;
+#else
+static int nfc_load_state = 0;
+#endif
+
+/** Return the cached NFC tables, loading them on first use. Thread-safe via
+ * compare-and-swap on the load gate; only one thread runs the actual load. */
 static inline NfcData* nfc_get_or_load(const char* path) {
-  if (!nfc_load_tried) {
-    nfc_load_tried = 1;
+#if defined(__GNUC__) || defined(__clang__)
+  /* Fast path: already loaded (with acquire semantics so we observe nfc_cached). */
+  if (__atomic_load_n(&nfc_load_state, __ATOMIC_ACQUIRE) == 1) {
+    return nfc_cached;
+  }
+  int expected = 0;
+  if (__atomic_compare_exchange_n(&nfc_load_state, &expected, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    /* We won the race: do the load, then mark complete. */
+    NfcData* loaded = nfc_load_binary(path);
+    if (!loaded) {
+      fprintf(stderr, "lighter: warning: %s missing or invalid; NFC normalization disabled\n", path);
+    }
+    nfc_cached = loaded;
+    __atomic_store_n(&nfc_load_state, 1, __ATOMIC_RELEASE);
+    return loaded;
+  }
+  /* Lost the race: spin briefly until the winner finishes. The load is fast
+   * (~ms on a 36KB binary) and only contended for the first few calls. */
+  while (__atomic_load_n(&nfc_load_state, __ATOMIC_ACQUIRE) != 1) {
+  }
+  return nfc_cached;
+#else
+  /* No atomics available; assume single-threaded. */
+  if (nfc_load_state == 0) {
+    nfc_load_state = 1;
     nfc_cached = nfc_load_binary(path);
     if (!nfc_cached) {
       fprintf(stderr, "lighter: warning: %s missing or invalid; NFC normalization disabled\n", path);
     }
   }
   return nfc_cached;
+#endif
 }
 
 /* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */
@@ -923,27 +956,8 @@ static const uint8_t* nfc_scan_high_avx2(const uint8_t* p, const uint8_t* end, i
 }
 #endif /* LIGHTER_PLATFORM_X86 */
 
-#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-/** Scan ASCII-only span with RVV; return updated pointer and set *found_high. */
-LIGHTER_TARGET_RVV
-static const uint8_t* nfc_scan_high_rvv(const uint8_t* p, const uint8_t* end, int* found_high) {
-  while (p < end) {
-    size_t n = end - p;
-    size_t vl = __riscv_vsetvl_e8m1(n);
-    vuint8m1_t chunk = __riscv_vle8_v_u8m1(p, vl);
-    vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(chunk, 127, vl);
-    if (__riscv_vfirst_m_b8(mask, vl) >= 0) {
-      *found_high = 1;
-      break;
-    }
-    p += vl;
-  }
-  return p;
-}
-#endif
-
 /** Return the NFC quick-check result for the UTF-8 span [start, end). */
-static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx2, int has_neon, int has_rvv) {
+static inline int nfc_quick_check(const char* path, const uint8_t* start, const uint8_t* end, int has_avx2, int has_neon) {
   const uint8_t* p = start;
   int found_high = 0;
 
@@ -963,11 +977,6 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
       }
       p += 16;
     }
-  } else
-#endif
-#if LIGHTER_PLATFORM_RISCV && !defined(LIGHTER_NO_RVV_INTRINSICS)
-      if (has_rvv && LIGHTER_RVV_SITE_ENABLED("nfc")) {
-    p = nfc_scan_high_rvv(p, end, &found_high);
   } else
 #endif
   {

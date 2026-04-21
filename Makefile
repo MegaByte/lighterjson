@@ -13,10 +13,22 @@ OMPFLAGS := $(shell \
     echo "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib -lomp"; \
   fi)
 
+# RELEASE=1 strips symbols and runs `strip` after link for the smallest binary.
+# Default builds keep symbols for easier debugging.
+RELEASE ?= 0
+ifeq ($(RELEASE),1)
+  LDFLAGS_RELEASE = -Wl,-S -Wl,-x
+  STRIP_CMD = strip -x
+else
+  LDFLAGS_RELEASE =
+  STRIP_CMD = :
+endif
+
 all: lighterjson lighter.nfc
 
 lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_cpu.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/lighter_transcode.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
-	$(CC) $(CFLAGS) $(OMPFLAGS) -Isrc -o lighterjson src/lighterjson.c
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(LDFLAGS_RELEASE) -Isrc -o lighterjson src/lighterjson.c
+	@$(STRIP_CMD) lighterjson 2>/dev/null || true
 
 tools/gen_unicode_tables: tools/gen_unicode_tables.c src/unicode_nfc_builder.h src/unicode_nfc_shared.h
 	$(CC) $(CFLAGS) -Isrc -o tools/gen_unicode_tables tools/gen_unicode_tables.c

@@ -1,6 +1,9 @@
 #ifndef LIGHTER_CPU_H
 #define LIGHTER_CPU_H
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "lighter_common.h"
 
 /* Architecture detection. */
@@ -15,6 +18,44 @@
 #if defined(__riscv) || defined(__riscv__)
   #define LIGHTER_PLATFORM_RISCV 1
 #endif
+
+/* Per-SIMD-site toggle for benchmarking. Each call site gets a function-local
+ * static int cache; the comma-separated LIGHTERJSON_SIMD_DISABLE env var is
+ * parsed once on first call. Names: "whitespace", "string", "nfc",
+ * "significand", "exponent", or "all" to disable every site. Used to gate
+ * AVX2/NEON/RVV paths uniformly so bench_simd.sh works on any architecture.
+ *
+ * The env-var-named variant LIGHTERJSON_RVV_DISABLE is also recognized for
+ * back-compat with the old RVV-only bench harness. */
+static inline int lighter_simd_parse_site(const char* name) {
+  const char* env = getenv("LIGHTERJSON_SIMD_DISABLE");
+  if (!env || !*env) {
+    env = getenv("LIGHTERJSON_RVV_DISABLE");
+    if (!env || !*env) {
+      return 1;
+    }
+  }
+  size_t name_len = strlen(name);
+  const char* p = env;
+  while (*p) {
+    const char* comma = strchr(p, ',');
+    size_t span = comma ? (size_t)(comma - p) : strlen(p);
+    if ((span == 3 && memcmp(p, "all", 3) == 0) || (span == name_len && memcmp(p, name, name_len) == 0)) {
+      return 0;
+    }
+    p += span + (comma ? 1 : 0);
+  }
+  return 1;
+}
+
+#define LIGHTER_SIMD_SITE_ENABLED(name_literal)                       \
+  ({                                                                  \
+    static int _lighter_simd_site_cache = -1;                         \
+    if (_lighter_simd_site_cache < 0) {                               \
+      _lighter_simd_site_cache = lighter_simd_parse_site(name_literal); \
+    }                                                                 \
+    _lighter_simd_site_cache;                                         \
+  })
 
 #if LIGHTER_PLATFORM_X86
 
@@ -114,45 +155,8 @@ struct lighter_riscv_hwprobe {
   uint64_t value;
 };
 
-  #include <stdlib.h>
-  #include <string.h>
-
-/* Per-RVV-site toggles for benchmarking. The comparison and env parsing happen
- * exactly once per site via a function-local static guarded by a parsed-once
- * flag; subsequent calls fold into a single cached-int load. Names in the
- * LIGHTERJSON_RVV_DISABLE env var (comma-separated) disable the matching
- * site(s); "all" disables every site; unset or empty keeps them enabled.
- *
- * The intended usage is LIGHTER_RVV_SITE_ENABLED("whitespace") etc. — each
- * call site gets its own cache slot and the string comparison happens only
- * on the first call through that site, not in the hot path. */
-static inline int lighter_rvv_parse_site(const char* name) {
-  const char* env = getenv("LIGHTERJSON_RVV_DISABLE");
-  if (!env || !*env) {
-    return 1;
-  }
-  size_t name_len = strlen(name);
-  const char* p = env;
-  while (*p) {
-    const char* comma = strchr(p, ',');
-    size_t span = comma ? (size_t)(comma - p) : strlen(p);
-    if ((span == 3 && memcmp(p, "all", 3) == 0) || (span == name_len && memcmp(p, name, name_len) == 0)) {
-      return 0;
-    }
-    p += span + (comma ? 1 : 0);
-  }
-  return 1;
-}
-
-/* Hot-path gate: a static int per call site, initialized on first call. */
-  #define LIGHTER_RVV_SITE_ENABLED(name_literal)              \
-    ({                                                        \
-      static int _lighter_rvv_site_cache = -1;                \
-      if (_lighter_rvv_site_cache < 0) {                      \
-        _lighter_rvv_site_cache = lighter_rvv_parse_site(name_literal); \
-      }                                                       \
-      _lighter_rvv_site_cache;                                \
-    })
+  /* RVV site gate is the same as the generic SIMD gate; preserved for callers. */
+  #define LIGHTER_RVV_SITE_ENABLED(name_literal) LIGHTER_SIMD_SITE_ENABLED(name_literal)
 
 /** Return non-zero when RVV is available on the current RISC-V CPU. */
 static inline int lighter_cpu_supports_rvv(void) {
@@ -171,8 +175,8 @@ static inline int lighter_cpu_supports_rvv(void) {
 static inline int lighter_cpu_supports_rvv(void) {
   return 0;
 }
-/** Stub: per-site toggle is a no-op when RVV isn't available. */
-  #define LIGHTER_RVV_SITE_ENABLED(name_literal) 1
+/** Stub: alias to the generic SIMD gate. */
+  #define LIGHTER_RVV_SITE_ENABLED(name_literal) LIGHTER_SIMD_SITE_ENABLED(name_literal)
 #endif
 
 #endif /* LIGHTER_CPU_H */

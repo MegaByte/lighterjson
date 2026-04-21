@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Benchmark each individual RVV vectorization site on the current host by
-# toggling them one at a time via LIGHTERJSON_RVV_DISABLE.
+# Benchmark each individual SIMD vectorization site on the current host by
+# toggling them one at a time via LIGHTERJSON_SIMD_DISABLE.
 #
-# Usage: bench/bench_rvv.sh [LIGHTERJSON_BIN] [CORPUS_DIR]
+# Works on x86_64 (AVX2), aarch64 (NEON), and RISC-V (RVV) — the gates compile
+# uniformly on every architecture; the script reports whichever sites the
+# current binary actually exercises.
+#
+# Usage: bench/bench_simd.sh [LIGHTERJSON_BIN] [CORPUS_DIR]
 #   defaults: ./lighterjson, bench/corpus
 #
 # Sites:
-#   whitespace  — skip_whitespace_rvv            (lighterjson.c)
-#   string      — lighter_simd_rvv_string_skip   (lighter_string.h)
-#   nfc         — nfc_scan_high_rvv              (unicode_nfc_runtime.h)
-#   significand — lighter_significand_chunk_rvv  (lighter_number.h)
-#   exponent    — lighter_exponent_chunk_rvv     (lighter_number.h)
+#   whitespace  — skip_whitespace_{avx2,neon,rvv}
+#   string      — string-skip SIMD scan inside lighter_do_string
+#   nfc         — non-ASCII prescan inside nfc_quick_check
+#   significand — vectorized digit/delimiter scan in number significand loop
+#   exponent    — vectorized digit scan in number exponent loop
+#
+# Note: not every arch has every site populated (e.g. RVV currently exposes
+# only string + significand; the rest fall through to scalar regardless of
+# the toggle). That's expected — the script just shows zero delta for those.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -31,6 +39,15 @@ fi
 
 SITES=(whitespace string nfc significand exponent)
 
+# Detect ISA label (purely cosmetic, for the header line).
+ISA="$(uname -m 2>/dev/null || echo unknown)"
+case "$ISA" in
+  x86_64|amd64) ISA_LABEL="AVX2" ;;
+  aarch64|arm64) ISA_LABEL="NEON" ;;
+  riscv64) ISA_LABEL="RVV" ;;
+  *) ISA_LABEL="$ISA" ;;
+esac
+
 # Best-of-N microseconds for one (binary, env, input) combo.
 bench_one() {
   local env_val="$1"
@@ -40,11 +57,10 @@ bench_one() {
   for ((i = 1; i <= RUNS; i++)); do
     cp "$input" "$WORK_FILE"
     local t
-    t=$(LIGHTERJSON_RVV_DISABLE="$env_val" python3 -c '
+    t=$(LIGHTERJSON_SIMD_DISABLE="$env_val" python3 -c '
 import os, subprocess, time
 bin = os.environ["LIGHTER"]
 work = os.environ["WORK_FILE"]
-env = {**os.environ}
 s = time.perf_counter()
 subprocess.check_call([bin, "-q", work])
 print(int((time.perf_counter() - s) * 1e6))
@@ -60,6 +76,7 @@ export LIGHTER WORK_FILE
 
 echo "lighterjson: $LIGHTER"
 echo "corpus:      $CORPUS_DIR"
+echo "ISA:         $ISA ($ISA_LABEL)"
 echo "runs/combo:  $RUNS (best-of)"
 echo ""
 
@@ -77,22 +94,22 @@ fi
 # Header
 printf "%-22s" "configuration"
 for input in "${INPUTS[@]}"; do
-  printf " %12s" "$(basename "$input" _big.json)"
+  printf " %16s" "$(basename "$input" _big.json)"
 done
 echo ""
 printf "%-22s" "----------------------"
 for _ in "${INPUTS[@]}"; do
-  printf " %12s" "------------"
+  printf " %16s" "----------------"
 done
 echo ""
 
 # Baseline: everything enabled
-printf "%-22s" "baseline (all RVV)"
+printf "%-22s" "baseline (all SIMD)"
 baseline=()
 for input in "${INPUTS[@]}"; do
   t=$(bench_one "" "$input")
   baseline+=("$t")
-  printf " %9d us" "$t"
+  printf " %13d us" "$t"
 done
 echo ""
 
@@ -101,7 +118,7 @@ printf "%-22s" "all disabled"
 for i in "${!INPUTS[@]}"; do
   t=$(bench_one "all" "${INPUTS[$i]}")
   pct=$(awk -v a="$t" -v b="${baseline[$i]}" 'BEGIN{printf "%+.1f", (a-b)*100/b}')
-  printf " %9d us (%s%%)" "$t" "$pct"
+  printf " %9d (%5s%%)" "$t" "$pct"
 done
 echo ""
 
@@ -111,14 +128,13 @@ for site in "${SITES[@]}"; do
   for i in "${!INPUTS[@]}"; do
     t=$(bench_one "$site" "${INPUTS[$i]}")
     pct=$(awk -v a="$t" -v b="${baseline[$i]}" 'BEGIN{printf "%+.1f", (a-b)*100/b}')
-    printf " %9d us (%s%%)" "$t" "$pct"
+    printf " %9d (%5s%%)" "$t" "$pct"
   done
   echo ""
 done
 
-# Each site disabled individually, complementary: only that site enabled
+# Each site only (complementary: disable everything else)
 for site in "${SITES[@]}"; do
-  # Disable all sites except the target: build the list excluding $site
   disable=""
   for s in "${SITES[@]}"; do
     if [ "$s" != "$site" ]; then
@@ -129,12 +145,12 @@ for site in "${SITES[@]}"; do
   for i in "${!INPUTS[@]}"; do
     t=$(bench_one "$disable" "${INPUTS[$i]}")
     pct=$(awk -v a="$t" -v b="${baseline[$i]}" 'BEGIN{printf "%+.1f", (a-b)*100/b}')
-    printf " %9d us (%s%%)" "$t" "$pct"
+    printf " %9d (%5s%%)" "$t" "$pct"
   done
   echo ""
 done
 
 echo ""
 echo "Positive % means the config is slower than baseline; negative means faster."
-echo "'no X' rows show what X contributes (negative = removing X helps, i.e. X is harmful)."
-echo "'only X' rows show X's contribution vs scalar (negative = X helps over scalar)."
+echo "'no X' rows show what X contributes (large positive = X is load-bearing)."
+echo "'only X' rows show X's contribution vs pure scalar (close to 0 = no win)."

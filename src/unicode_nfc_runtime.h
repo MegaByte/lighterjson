@@ -962,12 +962,12 @@ static inline int nfc_quick_check(const char* path, const uint8_t* start, const 
   int found_high = 0;
 
 #if LIGHTER_PLATFORM_X86
-  if (has_avx2) {
+  if (has_avx2 && LIGHTER_SIMD_SITE_ENABLED("nfc")) {
     p = nfc_scan_high_avx2(p, end, &found_high);
   } else
 #endif
 #if LIGHTER_PLATFORM_ARM64
-  if (has_neon) {
+  if (has_neon && LIGHTER_SIMD_SITE_ENABLED("nfc")) {
     while (p + 16 <= end) {
       uint8x16_t chunk = vld1q_u8((const uint8_t*)p);
       /* Any byte >= 0x80 means non-ASCII; vmaxvq_u8 gives the max byte in one instruction. */

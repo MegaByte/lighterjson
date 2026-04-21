@@ -344,7 +344,7 @@ static inline void lighter_do_string(LighterData* data, int disable_nfc, int has
   int saw_non_ascii = 0;
 
 #if LIGHTER_PLATFORM_X86
-  if (has_avx2) {
+  if (has_avx2 && LIGHTER_SIMD_SITE_ENABLED("string")) {
     while (data->rindex < data->data_end) {
       lighter_simd_avx2_string_skip(data, &saw_non_ascii);
       if (lighter_string_tail_at_end(data, disable_nfc, has_avx2, has_neon, has_rvv, &saw_non_ascii, out_quote_start)) {

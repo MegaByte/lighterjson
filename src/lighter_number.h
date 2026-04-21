@@ -320,9 +320,11 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
   }
 }
 
-/** Parse, normalize, and rewrite the JSON number at rindex. */
+/** Parse, normalize, and rewrite the JSON number at rindex. preserve_neg_zero
+ * keeps the leading '-' on numbers whose magnitude is zero (e.g. "-0", "-0.0",
+ * "-0e5"); when 0 those collapse to plain "0". */
 LIGHTER_TARGET_AVX2
-static void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx2, int has_neon, int has_rvv) {
+static void lighter_do_number_impl(LighterData* data, int64_t precision, int preserve_neg_zero, int has_avx2, int has_neon, int has_rvv) {
   (void)has_neon;
   (void)has_rvv;
   uint8_t* decimal = 0;
@@ -381,7 +383,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
   for (i = p_scan; i < data->data_end && !exponent && !number_end;) {
     /* SIMD acceleration for long significands */
 #if LIGHTER_PLATFORM_X86
-    if (has_avx2 && i + 32 <= data->data_end) {
+    if (has_avx2 && LIGHTER_SIMD_SITE_ENABLED("significand") && i + 32 <= data->data_end) {
       __m256i chunk = _mm256_loadu_si256((const __m256i*)i);
       __m256i m_digit = lighter_simd_is_digit_avx2(chunk);
       __m256i m_dot = _mm256_cmpeq_epi8(chunk, avx2_dot);
@@ -433,7 +435,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
       }
     }
 #elif LIGHTER_PLATFORM_ARM64
-    if (has_neon && i + 16 <= data->data_end) {
+    if (has_neon && LIGHTER_SIMD_SITE_ENABLED("significand") && i + 16 <= data->data_end) {
       uint8x16_t chunk = vld1q_u8(i);
       uint8x16_t m_digit = lighter_simd_is_digit_neon(chunk);
       uint8x16_t m_dot = vceqq_u8(chunk, neon_dot);
@@ -526,7 +528,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
   if (!number_end && i < data->data_end) {
     for (; i < data->data_end && !number_end;) {
 #if LIGHTER_PLATFORM_X86
-      if (has_avx2 && i + 32 <= data->data_end) {
+      if (has_avx2 && LIGHTER_SIMD_SITE_ENABLED("exponent") && i + 32 <= data->data_end) {
         __m256i chunk = _mm256_loadu_si256((const __m256i*)i);
         uint32_t mask_invalid = ~lighter_simd_mask_avx2(lighter_simd_is_digit_avx2(chunk)) & 0xFFFFFFFF;
         if (mask_invalid) {
@@ -546,7 +548,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
         }
       }
 #elif LIGHTER_PLATFORM_ARM64
-      if (has_neon && i + 16 <= data->data_end) {
+      if (has_neon && LIGHTER_SIMD_SITE_ENABLED("exponent") && i + 16 <= data->data_end) {
         uint8x16_t chunk = vld1q_u8(i);
         uint8x16_t m_digit = lighter_simd_is_digit_neon(chunk);
         uint8x16_t m_invalid = vmvnq_u8(m_digit);
@@ -596,8 +598,12 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
     number_end = data->data_end - 1;
   }
   if (!non_zero_start) {
-    /* Value is zero. Emit just '0' (sign dropped for -0) and skip the whole source number. */
-    if (negative) {
+    /* Value is zero. Emit "0" (or "-0" when preserve_neg_zero is set) and skip
+     * the whole source number. The leading '-' (if any) sits at lindex; rindex
+     * is past it. Default: roll rindex back so [lindex, rindex) is empty and
+     * the offset jumps past the '-' along with the rest. Preserve: leave rindex
+     * where it is so the '-' flushes through naturally. */
+    if (negative && !preserve_neg_zero) {
       --(data->rindex);
     }
     lighter_write_data(data, number_end + 1 - data->rindex);
@@ -852,7 +858,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
 
 /** Parse and optionally reformat a JSON number. precision: LIGHTER_PRECISION_UNLIMITED = preserve form. */
 static inline void lighter_do_number(LighterData* data, int64_t precision) {
-  lighter_do_number_impl(data, precision, lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(), lighter_cpu_supports_rvv());
+  lighter_do_number_impl(data, precision, /*preserve_neg_zero=*/0, lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(), lighter_cpu_supports_rvv());
 }
 
 #endif /* LIGHTER_NUMBER_H */

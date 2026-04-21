@@ -54,6 +54,7 @@ typedef struct Context {
   int disable_nfc;
   int force_utf8_output;
   int async_io;
+  int preserve_neg_zero;
   int has_avx2;
   int has_neon;
   int has_rvv;
@@ -123,11 +124,11 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
     return run;
   }
 #if LIGHTER_PLATFORM_X86
-  if (has_avx2) {
+  if (has_avx2 && LIGHTER_SIMD_SITE_ENABLED("whitespace")) {
     run = skip_whitespace_avx2(run, end, include_newline);
   }
 #elif LIGHTER_PLATFORM_ARM64
-  if (has_neon) {
+  if (has_neon && LIGHTER_SIMD_SITE_ENABLED("whitespace")) {
     uint8x16_t spaces = vdupq_n_u8(' ');
     uint8x16_t tabs = vdupq_n_u8('\t');
     uint8x16_t crs = vdupq_n_u8('\r');
@@ -184,7 +185,7 @@ static void do_string(LighterData* data, Context* ctx) {
 
 /** Dispatch JSON number parsing with the current precision and CPU flags. */
 static void do_number(LighterData* data, Context* ctx) {
-  lighter_do_number_impl(data, ctx->precision, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+  lighter_do_number_impl(data, ctx->precision, ctx->preserve_neg_zero, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
 /** Parse an object key or detect the end of the current object. */
@@ -791,6 +792,7 @@ void usage(char progname[], int status) {
           "JSON minifier\n"
           "Options:\n"
           "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -0   Preserve negative zero (e.g. \"-0\" stays \"-0\")\n"
           "  -8   Force UTF-8 output\n"
           "  -n   Process NDJSON/JSON Lines\n"
           "  -N   Process NDJSON, preserving empty lines\n"
@@ -812,6 +814,7 @@ int main(int argc, char* argv[]) {
       .disable_nfc = 0,
       .force_utf8_output = 0,
       .async_io = 1,
+      .preserve_neg_zero = 0,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
       .has_avx2 = lighter_cpu_supports_avx2(),
       .has_neon = lighter_cpu_supports_neon(),
@@ -852,6 +855,9 @@ int main(int argc, char* argv[]) {
           break;
         case 's':
           ctx.async_io = 0;
+          break;
+        case '0':
+          ctx.preserve_neg_zero = 1;
           break;
         case 'p': {
           if (o[1]) {

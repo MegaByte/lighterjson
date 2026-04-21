@@ -891,17 +891,44 @@ bin_fail:
 }
 
 static NfcData* nfc_cached = NULL;
-static int nfc_load_tried = 0;
+/* nfc_load_state: 0 = not tried, 1 = done, 2 = load in progress. */
+#if defined(__GNUC__) || defined(__clang__)
+static volatile int nfc_load_state = 0;
+#else
+static int nfc_load_state = 0;
+#endif
+
 /** Return the cached NFC tables, loading them on first use. */
 static inline NfcData* nfc_get_or_load(const char* path) {
-  if (!nfc_load_tried) {
-    nfc_load_tried = 1;
+#if defined(__GNUC__) || defined(__clang__)
+  /* Already loaded. */
+  if (__atomic_load_n(&nfc_load_state, __ATOMIC_ACQUIRE) == 1) {
+    return nfc_cached;
+  }
+  int expected = 0;
+  if (__atomic_compare_exchange_n(&nfc_load_state, &expected, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    NfcData* loaded = nfc_load_binary(path);
+    if (!loaded) {
+      fprintf(stderr, "lighter: warning: %s missing or invalid; NFC normalization disabled\n", path);
+    }
+    nfc_cached = loaded;
+    __atomic_store_n(&nfc_load_state, 1, __ATOMIC_RELEASE);
+    return loaded;
+  }
+  /* Wait for the in-flight load to finish. */
+  while (__atomic_load_n(&nfc_load_state, __ATOMIC_ACQUIRE) != 1) {
+  }
+  return nfc_cached;
+#else
+  if (nfc_load_state == 0) {
+    nfc_load_state = 1;
     nfc_cached = nfc_load_binary(path);
     if (!nfc_cached) {
       fprintf(stderr, "lighter: warning: %s missing or invalid; NFC normalization disabled\n", path);
     }
   }
   return nfc_cached;
+#endif
 }
 
 /* ── Quick Check: does this UTF-8 segment need NFC normalization? ── */

@@ -1,10 +1,34 @@
 CC = cc
 CFLAGS = -O3 -Wall
 
-all: lighterjson
+# OpenMP parallelizes batch processing of files in directory mode
+# (OMP_NUM_THREADS controls parallelism). Auto-detect by probing the compiler;
+# override with OMPFLAGS= to disable or OMPFLAGS="-fopenmp ..." to force.
+# Apple clang needs explicit libomp paths (brew install libomp).
+OMPFLAGS := $(shell \
+  if $(CC) -fopenmp -dM -E - < /dev/null > /dev/null 2>&1; then \
+    echo -fopenmp; \
+  elif [ -f /opt/homebrew/opt/libomp/include/omp.h ] && \
+       $(CC) -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib -lomp -dM -E - < /dev/null > /dev/null 2>&1; then \
+    echo "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -L/opt/homebrew/opt/libomp/lib -lomp"; \
+  fi)
 
-lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
-	$(CC) $(CFLAGS) -Isrc -o lighterjson src/lighterjson.c
+# RELEASE=1 strips symbols and runs `strip` after link for the smallest binary.
+# Default builds keep symbols for easier debugging.
+RELEASE ?= 0
+ifeq ($(RELEASE),1)
+  LDFLAGS_RELEASE = -Wl,-S -Wl,-x
+  STRIP_CMD = strip -x
+else
+  LDFLAGS_RELEASE =
+  STRIP_CMD = :
+endif
+
+all: lighterjson lighter.nfc
+
+lighterjson: src/lighterjson.c src/lighter_bitfield.h src/lighter_common.h src/lighter_cpu.h src/lighter_memmap.h src/lighter_number.h src/lighter_string.h src/lighter_transcode.h src/unicode_nfc_shared.h src/unicode_nfc_runtime.h
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(LDFLAGS_RELEASE) -Isrc -o lighterjson src/lighterjson.c
+	@$(STRIP_CMD) lighterjson 2>/dev/null || true
 
 tools/gen_unicode_tables: tools/gen_unicode_tables.c src/unicode_nfc_builder.h src/unicode_nfc_shared.h
 	$(CC) $(CFLAGS) -Isrc -o tools/gen_unicode_tables tools/gen_unicode_tables.c
@@ -23,12 +47,13 @@ ucd/NormalizationTest.txt:
 	mkdir -p ucd
 	curl -s -o $@ $(UCD_URL)/NormalizationTest.txt
 
-ucd: ucd/UnicodeData.txt ucd/DerivedNormalizationProps.txt ucd/CompositionExclusions.txt ucd/NormalizationTest.txt
+UCD_FILES = ucd/UnicodeData.txt ucd/DerivedNormalizationProps.txt ucd/CompositionExclusions.txt ucd/NormalizationTest.txt
+ucd: $(UCD_FILES)
 
 test_nfc: tools/test_nfc.c src/unicode_nfc_shared.h src/unicode_nfc_runtime.h src/unicode_nfc_builder.h
 	$(CC) $(CFLAGS) -Isrc -o test_nfc tools/test_nfc.c
 
-test: test_nfc lighter.nfc ucd
+test: test_nfc lighter.nfc $(UCD_FILES)
 	./test_nfc lighter.nfc ucd
 
 test-json: lighterjson lighter.nfc
@@ -36,7 +61,7 @@ test-json: lighterjson lighter.nfc
 
 test-all: test test-json
 
-lighter.nfc: tools/gen_unicode_tables ucd
+lighter.nfc: tools/gen_unicode_tables $(UCD_FILES)
 	./tools/gen_unicode_tables ucd > lighter.nfc
 
 clean:

@@ -320,9 +320,11 @@ static inline void lighter_write_adjusted_exponent(LighterData* data, uint8_t* s
   }
 }
 
-/** Parse, normalize, and rewrite the JSON number at rindex. */
+/** Parse, normalize, and rewrite the JSON number at rindex. preserve_neg_zero
+ * keeps the leading '-' on numbers whose magnitude is zero (e.g. "-0", "-0.0",
+ * "-0e5"); when 0 those collapse to plain "0". */
 LIGHTER_TARGET_AVX2
-static void lighter_do_number_impl(LighterData* data, int64_t precision, int has_avx2, int has_neon, int has_rvv) {
+static void lighter_do_number_impl(LighterData* data, int64_t precision, int preserve_neg_zero, int has_avx2, int has_neon, int has_rvv) {
   (void)has_neon;
   (void)has_rvv;
   uint8_t* decimal = 0;
@@ -362,10 +364,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
   }
   data->rindex = p_scan;
 
-  /* Fast path for common short integers: already canonical form, no reformatting.
-   * Requires: first digit is '1'..'9', subsequent bytes up to a non-digit are all
-   * digits (no '.', no 'e'/'E'), and precision is UNLIMITED so no rounding occurs.
-   * Big win on integer-heavy workloads; small overhead on float-heavy ones. */
+  /* Skip reformatting for canonical integers when precision is unlimited. */
   if (precision == LIGHTER_PRECISION_UNLIMITED && p_scan < data->data_end && (unsigned)(*p_scan - '1') < 9u) {
     uint8_t* q = p_scan + 1;
     while (q < data->data_end && (unsigned)(*q - '0') <= 9u) {
@@ -596,8 +595,12 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
     number_end = data->data_end - 1;
   }
   if (!non_zero_start) {
-    /* Value is zero. Emit just '0' (sign dropped for -0) and skip the whole source number. */
-    if (negative) {
+    /* Value is zero. Emit "0" (or "-0" when preserve_neg_zero is set) and skip
+     * the whole source number. The leading '-' (if any) sits at lindex; rindex
+     * is past it. Default: roll rindex back so [lindex, rindex) is empty and
+     * the offset jumps past the '-' along with the rest. Preserve: leave rindex
+     * where it is so the '-' flushes through naturally. */
+    if (negative && !preserve_neg_zero) {
       --(data->rindex);
     }
     lighter_write_data(data, number_end + 1 - data->rindex);
@@ -852,7 +855,7 @@ static void lighter_do_number_impl(LighterData* data, int64_t precision, int has
 
 /** Parse and optionally reformat a JSON number. precision: LIGHTER_PRECISION_UNLIMITED = preserve form. */
 static inline void lighter_do_number(LighterData* data, int64_t precision) {
-  lighter_do_number_impl(data, precision, lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(), lighter_cpu_supports_rvv());
+  lighter_do_number_impl(data, precision, /*preserve_neg_zero=*/0, lighter_cpu_supports_avx2(), lighter_cpu_supports_neon(), lighter_cpu_supports_rvv());
 }
 
 #endif /* LIGHTER_NUMBER_H */

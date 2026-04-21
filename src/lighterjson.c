@@ -43,6 +43,10 @@
 #include "lighter_string.h"
 #include "lighter_transcode.h"
 
+#if defined(_OPENMP)
+  #include <omp.h>
+#endif
+
 typedef struct Context {
   int64_t precision;
   int quiet;
@@ -50,6 +54,7 @@ typedef struct Context {
   int disable_nfc;
   int force_utf8_output;
   int async_io;
+  int preserve_neg_zero;
   int has_avx2;
   int has_neon;
   int has_rvv;
@@ -100,8 +105,7 @@ static inline uint8_t* skip_whitespace_impl(uint8_t* run, uint8_t* end, int incl
   (void)has_avx2;
   (void)has_neon;
   (void)has_rvv;
-  /* Use a short scalar prefix before the SIMD scan so brief whitespace runs are
-   * handled without the full vector setup cost. */
+  /* Handle short runs before the SIMD scan. */
   const uint64_t ws_mask =
       include_newline ? ((1ULL << ' ') | (1ULL << '\t') | (1ULL << '\n') | (1ULL << '\r')) : ((1ULL << ' ') | (1ULL << '\t') | (1ULL << '\r'));
   uint8_t* fast_end = run + 2;
@@ -180,7 +184,7 @@ static void do_string(LighterData* data, Context* ctx) {
 
 /** Dispatch JSON number parsing with the current precision and CPU flags. */
 static void do_number(LighterData* data, Context* ctx) {
-  lighter_do_number_impl(data, ctx->precision, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
+  lighter_do_number_impl(data, ctx->precision, ctx->preserve_neg_zero, ctx->has_avx2, ctx->has_neon, ctx->has_rvv);
 }
 
 /** Parse an object key or detect the end of the current object. */
@@ -396,43 +400,62 @@ static int do_file(Context* ctx, char filename[]) {
     return EXIT_FAILURE;
   }
   map_capacity = map.size;
-  if (!ctx->quiet) {
-    printf("%s: ", filename);
-  }
   LighterEncoding orig_encoding = lighter_detect_encoding(map.data, map.size);
   size_t bom_size = lighter_encoding_bom_size(orig_encoding, map.data, map.size);
   size_t actual_size = map.size - bom_size;
   size_t orig_file_size = map.size; /* preserve for final savings report */
 
   if (orig_encoding != LIGHTER_ENC_UTF8) {
-    size_t max_utf8 = (orig_encoding == LIGHTER_ENC_UTF16LE || orig_encoding == LIGHTER_ENC_UTF16BE)
-                          ? (actual_size * LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR / LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR) + LIGHTER_TRANSCODE_SLACK_BYTES
-                          : actual_size + LIGHTER_TRANSCODE_SLACK_BYTES;
-    uint8_t* old_data = NULL;
-    size_t old_size_full = 0;
-
-    if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
-      fprintf(stderr, "Could not expand file for transcoding\n");
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
-    }
-
-    uint8_t* transcode_src;
-    if (old_data) {
-      transcode_src = old_data + bom_size;
-    } else {
-      /* Windows fallback: move to end of new mapping to avoid overlap issues */
-      memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
-      transcode_src = map.data + max_utf8 - actual_size;
-    }
-
     size_t utf8_size;
-    lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_encoding, &utf8_size);
-    map.size = utf8_size;
-    map_capacity = max_utf8;
+    if (orig_encoding == LIGHTER_ENC_UTF32LE || orig_encoding == LIGHTER_ENC_UTF32BE) {
+      /* UTF-32 → UTF-8 is always strictly smaller (4 source bytes per codepoint
+       * become at most 4 UTF-8 bytes, usually fewer). Output never overtakes
+       * input, so we can transcode in place without expanding the mapping. */
+      if (lighter_utf32_is_ascii_only(map.data + bom_size, actual_size, orig_encoding == LIGHTER_ENC_UTF32LE)) {
+        /* All codepoints < 0x80: one UTF-8 byte each. Pack low byte of each
+         * 32-bit codepoint into a compact UTF-8 byte stream. */
+        lighter_transcode_utf32_ascii_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding == LIGHTER_ENC_UTF32LE, &utf8_size);
+      } else {
+        lighter_transcode_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding, &utf8_size);
+      }
+      map.size = utf8_size;
+    } else if (lighter_utf16_is_ascii_only(map.data + bom_size, actual_size, orig_encoding == LIGHTER_ENC_UTF16LE)) {
+      /* UTF-16 ASCII-only: every codepoint < 0x80, so each pair of source bytes
+       * becomes a single UTF-8 byte. Output is half the input size and never
+       * overtakes the read pointer; transcode in place via a tight pack loop. */
+      lighter_transcode_utf16_ascii_to_utf8(map.data + bom_size, actual_size, map.data, orig_encoding == LIGHTER_ENC_UTF16LE, &utf8_size);
+      map.size = utf8_size;
+    } else {
+      /* UTF-16 can grow: a BMP non-Latin codepoint occupies 2 UTF-16 bytes but
+       * 3 UTF-8 bytes. Worst case is 1.5x. Expand the mapping first, then
+       * transcode using the relocated source mapping. */
+      size_t max_utf8 = (actual_size * LIGHTER_UTF16_TO_UTF8_GROW_NUMERATOR / LIGHTER_UTF16_TO_UTF8_GROW_DENOMINATOR) + LIGHTER_TRANSCODE_SLACK_BYTES;
+      uint8_t* old_data = NULL;
+      size_t old_size_full = 0;
+      if (lighter_map_expand(&map, max_utf8, &old_data, &old_size_full) != 0) {
+        fprintf(stderr, "Could not expand file for transcoding\n");
+        lighter_map_close(&map);
+        return EXIT_FAILURE;
+      }
 
-    if (old_data) {
-      lighter_map_unmap(old_data, old_size_full);
+      uint8_t* transcode_src;
+      if (old_data) {
+        /* Two distinct mappings: read from the old, write into the new. */
+        transcode_src = old_data + bom_size;
+      } else {
+        /* In-place grow gave us one mapping covering both source and destination.
+         * Slide the source to the tail so the forward write can't overrun it. */
+        memmove(map.data + max_utf8 - actual_size, map.data + bom_size, actual_size);
+        transcode_src = map.data + max_utf8 - actual_size;
+      }
+
+      lighter_transcode_to_utf8(transcode_src, actual_size, map.data, orig_encoding, &utf8_size);
+      map.size = utf8_size;
+      map_capacity = max_utf8;
+
+      if (old_data) {
+        lighter_map_unmap(old_data, old_size_full);
+      }
     }
     bom_size = 0; /* BOM was already stripped during transcoding */
   }
@@ -448,6 +471,7 @@ static int do_file(Context* ctx, char filename[]) {
   data.rindex = map.data + bom_size;
   data.lindex = data.rindex;
   data.needs_quote = 0;
+  data.saw_non_ascii = 0;
 
   int exit_code = EXIT_SUCCESS;
   Bitfield parent_types;
@@ -499,16 +523,42 @@ static int do_file(Context* ctx, char filename[]) {
 
   size_t written = (size_t)(data.windex - data.data_start);
   if (!ctx->force_utf8_output && orig_encoding != LIGHTER_ENC_UTF8 && written > 0) {
-    size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
-    if ((written > back_size ? written : back_size) > map_capacity) {
-      fprintf(stderr, "Could not re-transcode %s in place\n", filename);
-      lighter_map_close(&map);
-      return EXIT_FAILURE;
+    /* ASCII-only output can widen directly to UTF-16/32 without rescanning. */
+    if (!data.saw_non_ascii) {
+      size_t back_size;
+      int is_le;
+      if (orig_encoding == LIGHTER_ENC_UTF32LE || orig_encoding == LIGHTER_ENC_UTF32BE) {
+        back_size = written * 4;
+        is_le = (orig_encoding == LIGHTER_ENC_UTF32LE);
+        if (back_size > map_capacity) {
+          fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+          lighter_map_close(&map);
+          return EXIT_FAILURE;
+        }
+        lighter_transcode_utf8_ascii_to_utf32(data.data_start, written, map.data + back_size, is_le);
+      } else {
+        back_size = written * 2;
+        is_le = (orig_encoding == LIGHTER_ENC_UTF16LE);
+        if (back_size > map_capacity) {
+          fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+          lighter_map_close(&map);
+          return EXIT_FAILURE;
+        }
+        lighter_transcode_utf8_ascii_to_utf16(data.data_start, written, map.data + back_size, is_le);
+      }
+      written = back_size;
+    } else {
+      size_t back_size = lighter_transcode_from_utf8_size(data.data_start, written, orig_encoding);
+      if ((written > back_size ? written : back_size) > map_capacity) {
+        fprintf(stderr, "Could not re-transcode %s in place\n", filename);
+        lighter_map_close(&map);
+        return EXIT_FAILURE;
+      }
+      /* BOM is stripped; transcode preserves the original byte order. Byte order is
+       * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
+      lighter_transcode_from_utf8_backward(data.data_start, written, orig_encoding, map.data + back_size);
+      written = back_size;
     }
-    /* BOM is stripped; transcode preserves the original byte order. Byte order is
-     * unambiguously inferable from null-byte patterns for JSON whose first char is ASCII. */
-    lighter_transcode_from_utf8_backward(data.data_start, written, orig_encoding, map.data + back_size);
-    written = back_size;
   }
 
   if (written > 0 && lighter_map_sync(&map, written, ctx->async_io) != 0) {
@@ -522,18 +572,36 @@ static int do_file(Context* ctx, char filename[]) {
   }
 
   lighter_map_close(&map);
-  if (!ctx->quiet && orig_file_size > written) {
-    printf("Saved %lu bytes\n", (unsigned long)(orig_file_size - written));
-  } else if (!ctx->quiet) {
-    printf("Saved 0 bytes\n");
+  if (!ctx->quiet) {
+    /* Emit each status line with one fwrite to avoid interleaved output. */
+    unsigned long saved = (orig_file_size > written) ? (unsigned long)(orig_file_size - written) : 0ul;
+    char line[2048];
+    int n = snprintf(line, sizeof(line), "%s: Saved %lu bytes\n", filename, saved);
+    if (n > 0) {
+      if ((size_t)n >= sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+      }
+      fwrite(line, 1, (size_t)n, stdout);
+    }
   }
   return exit_code;
 }
 
+/** Run do_file on a heap-allocated path, update exit_code on failure, and free
+ * the path. */
+static void process_one_file(Context* ctx, char* path, int* exit_code) {
+  if (do_file(ctx, path) != EXIT_SUCCESS) {
+#if defined(_OPENMP)
+  #pragma omp atomic write
+#endif
+    *exit_code = EXIT_FAILURE;
+  }
+  free(path);
+}
+
 #if LIGHTER_PLATFORM_WIN
-/** Recursively process one directory on Windows. */
-static int do_dir_win(Context* ctx, PathBuffer* pb) {
-  int exit_code = EXIT_SUCCESS;
+/** Recursively walk a directory on Windows, spawning an OpenMP task per file. */
+static int walk_dir_win(Context* ctx, PathBuffer* pb, int* exit_code_out) {
   size_t plen = strlen(pb->buf);
   wchar_t* long_wpath = lighter_make_long_path_w(pb->buf);
   if (!long_wpath) {
@@ -596,27 +664,31 @@ static int do_dir_win(Context* ctx, PathBuffer* pb) {
     }
 
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      if (do_dir_win(ctx, pb) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      if (walk_dir_win(ctx, pb, exit_code_out) != EXIT_SUCCESS) {
+        *exit_code_out = EXIT_FAILURE;
       }
     } else if (dir_should_process(ctx, pb->buf)) {
-      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      char* path = strdup(pb->buf);
+      if (!path) {
+        fprintf(stderr, "Out of memory\n");
+        FindClose(h);
+        return EXIT_FAILURE;
       }
+  #if defined(_OPENMP)
+    #pragma omp task firstprivate(path, ctx, exit_code_out)
+      process_one_file(ctx, path, exit_code_out);
+  #else
+      process_one_file(ctx, path, exit_code_out);
+  #endif
     }
     pb->buf[plen] = '\0';
   } while (FindNextFileW(h, &fd));
   FindClose(h);
-  return exit_code;
-}
-/** Dispatch directory processing through the Windows walker. */
-static int do_dir(Context* ctx, PathBuffer* pb) {
-  return do_dir_win(ctx, pb);
+  return *exit_code_out;
 }
 #else
-/** Recursively process one directory on POSIX platforms. */
-static int do_dir(Context* ctx, PathBuffer* pb) {
-  int exit_code = EXIT_SUCCESS;
+/** Recursively walk a directory on POSIX, spawning an OpenMP task per file. */
+static int walk_dir(Context* ctx, PathBuffer* pb, int* exit_code_out) {
   DIR* dir = opendir(pb->buf);
   if (!dir) {
     fprintf(stderr, "Could not open %s: %s\n", pb->buf, strerror(errno));
@@ -650,20 +722,53 @@ static int do_dir(Context* ctx, PathBuffer* pb) {
     }
 
     if (entry->d_type == DT_DIR) {
-      if (do_dir(ctx, pb) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      if (walk_dir(ctx, pb, exit_code_out) != EXIT_SUCCESS) {
+        *exit_code_out = EXIT_FAILURE;
       }
     } else if (dir_should_process(ctx, pb->buf)) {
-      if (do_file(ctx, pb->buf) != EXIT_SUCCESS) {
-        exit_code = EXIT_FAILURE;
+      char* path = strdup(pb->buf);
+      if (!path) {
+        fprintf(stderr, "Out of memory\n");
+        closedir(dir);
+        return EXIT_FAILURE;
       }
+  #if defined(_OPENMP)
+    #pragma omp task firstprivate(path, ctx, exit_code_out)
+      process_one_file(ctx, path, exit_code_out);
+  #else
+      process_one_file(ctx, path, exit_code_out);
+  #endif
     }
     pb->buf[plen] = '\0';
   }
   closedir(dir);
-  return exit_code;
+  return *exit_code_out;
 }
 #endif
+
+/** Top-level directory dispatch: walk the tree in a single thread, spawning an
+ * OpenMP task per matching file so workers can start processing as soon as the
+ * first file is found (no upfront list, no batched walk latency). NFC tables
+ * load lazily and thread-safely on the first non-ASCII string seen. */
+static int do_dir(Context* ctx, PathBuffer* pb) {
+  int exit_code = EXIT_SUCCESS;
+#if defined(_OPENMP)
+  #pragma omp parallel
+  {
+  #pragma omp single
+    {
+#endif
+#if LIGHTER_PLATFORM_WIN
+      walk_dir_win(ctx, pb, &exit_code);
+#else
+  walk_dir(ctx, pb, &exit_code);
+#endif
+#if defined(_OPENMP)
+    }
+  }
+#endif
+  return exit_code;
+}
 
 /** Print command-line usage and exit with status. */
 void usage(char progname[], int status) {
@@ -672,6 +777,7 @@ void usage(char progname[], int status) {
           "JSON minifier\n"
           "Options:\n"
           "  -p N Numeric precision (number of decimal places; can be negative)\n"
+          "  -0   Preserve negative zero (e.g. \"-0\" stays \"-0\")\n"
           "  -8   Force UTF-8 output\n"
           "  -n   Process NDJSON/JSON Lines\n"
           "  -N   Process NDJSON, preserving empty lines\n"
@@ -693,6 +799,7 @@ int main(int argc, char* argv[]) {
       .disable_nfc = 0,
       .force_utf8_output = 0,
       .async_io = 1,
+      .preserve_neg_zero = 0,
       /* CPU feature probes run once at startup; cached for every file/number/string. */
       .has_avx2 = lighter_cpu_supports_avx2(),
       .has_neon = lighter_cpu_supports_neon(),
@@ -733,6 +840,9 @@ int main(int argc, char* argv[]) {
           break;
         case 's':
           ctx.async_io = 0;
+          break;
+        case '0':
+          ctx.preserve_neg_zero = 1;
           break;
         case 'p': {
           if (o[1]) {
